@@ -1122,25 +1122,44 @@ static void ProcessCustomController(CPad* pad) {
         g_lightbarRed = 0; g_lightbarGreen = 120; g_lightbarBlue = 255;
     }
 
-    // SHARE / TOUCHPAD: Direct Map Shortcut
-    static BOOL s_lastMapBtn = FALSE;
-    BOOL mapBtn = (gp.btnShare || gp.btnTouch);
-    BOOL mapEdge = (mapBtn && !s_lastMapBtn);
-    s_lastMapBtn = mapBtn;
+    // ========================================================================
+    // PAUSE MENU (START / OPTIONS / PLAY) & MAPA (SHARE / TOUCHPAD)
+    // ========================================================================
+    static BOOL s_lastStartBtn = FALSE;
+    BOOL startEdge = (gp.btnStart && !s_lastStartBtn);
+    s_lastStartBtn = gp.btnStart;
 
-    if (mapEdge) {
-        LogMsg("[Menu] Share/Touchpad toggled! Active=%d, Page=%d\n", isMenuActive, curMenuPage);
+    static BOOL s_lastShareBtn = FALSE;
+    BOOL shareBtn = (gp.btnShare || gp.btnTouch);
+    BOOL shareEdge = (shareBtn && !s_lastShareBtn);
+    s_lastShareBtn = shareBtn;
+
+    // START (Options / Play) -> Alterna entre o Menu Principal de Opções e o Jogo
+    if (startEdge) {
+        LogMsg("[Menu] START pressed! Active=%d, Page=%d\n", isMenuActive, curMenuPage);
         if (!isMenuActive) {
-            FUNC_SwitchMenuOnAndOff((void*)ADDR_FRONTEND_MENU_MANAGER);
-            FUNC_SwitchToNewScreen((void*)ADDR_FRONTEND_MENU_MANAGER, 5);
-            return;
+            *(BYTE*)0x00BA677B = 1; // m_bStartUpFrontEndRequested = true (Abre Menu)
+            *(char*)0x00BA68A5 = 0; // m_nCurrentMenuPage = 0 (Opções)
+        } else {
+            *(BYTE*)0x00BA677A = 1; // m_bShutDownFrontEndRequested = true (Fecha Menu)
+        }
+        pad->NewState.Start = 255;
+    }
+
+    // SHARE (Create / Touchpad) -> Abre diretamente o Mapa do Jogo
+    if (shareEdge) {
+        LogMsg("[Menu] SHARE/TOUCHPAD pressed! Active=%d, Page=%d\n", isMenuActive, curMenuPage);
+        if (!isMenuActive) {
+            *(BYTE*)0x00BA677B = 1; // m_bStartUpFrontEndRequested = true
+            *(char*)0x00BA68A5 = 5; // m_nCurrentMenuPage = 5 (Mapa Direto)
+            *(BYTE*)0x00BA67A1 = 1; // m_bDrawRadarOrMap = true
         } else {
             if (curMenuPage == 5) {
-                FUNC_SwitchMenuOnAndOff((void*)ADDR_FRONTEND_MENU_MANAGER);
+                *(BYTE*)0x00BA677A = 1; // Fecha o mapa e volta ao jogo
             } else {
-                FUNC_SwitchToNewScreen((void*)ADDR_FRONTEND_MENU_MANAGER, 5);
+                *(char*)0x00BA68A5 = 5; // Pula de outra aba direto para o Mapa
+                *(BYTE*)0x00BA67A1 = 1;
             }
-            return;
         }
     }
 
@@ -1283,10 +1302,7 @@ static void ProcessCustomController(CPad* pad) {
         }
     }
 
-    // PAUSE MENU (Start / Options)
-    if (gp.btnStart) {
-        pad->NewState.Start = 255;
-    }
+    // PAUSE MENU (Start / Options) - handled via startEdge above
 
     // CAMERA VIEW CHANGE (PS Logo Button)
     if (gp.btnPS) {
