@@ -218,6 +218,24 @@ static void InitPS5Buttons(void) {
     return;
 }
 
+typedef struct {
+    float x;
+    float y;
+} CVector2D_t;
+
+// Hook para CTaskSimpleUseGun::ControlGunMove (0x0061E0C0)
+// Corrige o bug original do GTA SA onde m_MoveCmd interpolado com 0.07 era zerado
+// no mesmo frame por SetMoveAnim (moveCmdAbsSum < 0.1f), travando CJ no lugar
+// se o jogador ja estivesse andando ao apertar L2 para mirar.
+static BOOL __attribute__((thiscall)) Hooked_ControlGunMove(void* thisTask, const CVector2D_t* moveDir) {
+    if (thisTask && moveDir) {
+        *(float*)((BYTE*)thisTask + 0x14) = moveDir->x;
+        *(float*)((BYTE*)thisTask + 0x18) = moveDir->y;
+        *(BYTE*)((BYTE*)thisTask + 0x0A) = 1; // m_HasMoveControl = true
+    }
+    return TRUE;
+}
+
 static void EnsureMoveWhileAiming(void) {
     static DWORD s_lastCheck = 0;
     DWORD now = GetTickCount();
@@ -228,14 +246,25 @@ static void EnsureMoveWhileAiming(void) {
     if (VirtualProtect((LPVOID)0x00C8AAB8, 80 * 0x70, PAGE_EXECUTE_READWRITE, &oldProtect)) {
         for (int i = 0; i < 80; i++) {
             BYTE* pWInfo = (BYTE*)(0x00C8AAB8 + i * 0x70);
+            int modelId = *(int*)(pWInfo + 0x0C);
             DWORD* pFlags = (DWORD*)(pWInfo + 0x18);
             float* pMoveSpeed = (float*)(pWInfo + 0x3C);
-            // Ativa: bCanAim (0x01) | bAimWithArm (0x02) | bMoveAim (0x10) | bMoveFire (0x20)
-            *pFlags |= 0x33;
+
+            // Ativa: bCanAim (0x01) | bMoveAim (0x10) | bMoveFire (0x20)
+            *pFlags |= 0x31;
+
             // Remove b1stPerson (0x04) para não travar visão
             *pFlags &= ~0x04;
+
+            // Armas pesadas e rifles de duas mãos (M4, AK-47, Shotguns, MP5, Sniper, Rifles, etc.)
+            // NÃO podem ter bAimWithArm (0x02), senão a engine não chama PlayerControlZeldaWeapon!
+            // Somente armas de uma mão (Pistola 346, Sawnoff 350, Uzi 352, Tec9 372) mantêm bAimWithArm.
+            if (modelId != 346 && modelId != 350 && modelId != 352 && modelId != 372) {
+                *pFlags &= ~0x02;
+            }
+
             // Garante velocidade de movimento para a animação mover o personagem
-            if (*pMoveSpeed < 0.65f) {
+            if (*pMoveSpeed < 0.85f) {
                 *pMoveSpeed = 0.85f;
             }
         }
@@ -1347,6 +1376,19 @@ static void InstallHook(void) {
         LogMsg("[Hook] Pad0 CALL hook OK: 0x%08X -> our fn 0x%08X\n", ADDR_HOOK_PAD0, myAddr);
     } else {
         LogMsg("[Hook] FAILED VirtualProtect at 0x%08X\n", ADDR_HOOK_PAD0);
+    }
+
+    // 2. Hook JMP em CTaskSimpleUseGun::ControlGunMove (0x0061E0C0)
+    // 5-byte JMP direto substituindo a interpolacao com atraso da engine
+    if (VirtualProtect((LPVOID)0x0061E0C0, 5, PAGE_EXECUTE_READWRITE, &oldProtect)) {
+        DWORD myAddr = (DWORD)Hooked_ControlGunMove;
+        DWORD rel    = myAddr - (0x0061E0C0 + 5);
+        *(BYTE* )0x0061E0C0       = 0xE9;
+        *(DWORD*)(0x0061E0C0 + 1) = rel;
+        VirtualProtect((LPVOID)0x0061E0C0, 5, oldProtect, &oldProtect);
+        LogMsg("[Hook] ControlGunMove JMP hook OK: 0x0061E0C0 -> 0x%08X\n", myAddr);
+    } else {
+        LogMsg("[Hook] FAILED VirtualProtect at 0x0061E0C0\n");
     }
 }
 
