@@ -3,6 +3,7 @@
 #include <mmsystem.h>
 #include <setupapi.h>
 #include <hidsdi.h>
+#include <hidpi.h>
 #include <stdlib.h>
 #include <stdio.h>
 #include <math.h>
@@ -410,6 +411,7 @@ typedef enum {
 
 static volatile SonyDeviceType g_sonyDevType = SONY_DEV_NONE;
 static volatile BOOL g_sonyIsBluetooth = FALSE;
+static DWORD g_outputReportLength = 0;
 
 static HANDLE FindAndOpenDualSenseDevice(void) {
     GUID hidGuid;
@@ -446,17 +448,33 @@ static HANDLE FindAndOpenDualSenseDevice(void) {
                     attr.Size = sizeof(HIDD_ATTRIBUTES);
                     if (HidD_GetAttributes(h, &attr)) {
                         if (attr.VendorID == 0x054C) {
+                            PHIDP_PREPARSED_DATA pPreparsed = NULL;
+                            if (HidD_GetPreparsedData(h, &pPreparsed)) {
+                                HIDP_CAPS caps;
+                                if (HidP_GetCaps(pPreparsed, &caps) == HIDP_STATUS_SUCCESS) {
+                                    g_outputReportLength = caps.OutputReportByteLength;
+                                    LogMsg("[SonyHID] Caps: OutputReportByteLength = %u\n", g_outputReportLength);
+                                }
+                                HidD_FreePreparsedData(pPreparsed);
+                            }
+
                             if (attr.ProductID == 0x0CE6 || attr.ProductID == 0x0DF2) {
                                 g_sonyDevType = SONY_DEV_DUALSENSE;
-                                LogMsg("[SonyHID] Auto-detected Sony DualSense (PS5) (VID=0x%04X, PID=0x%04X)\n",
-                                       attr.VendorID, attr.ProductID);
+                                if (strstr(path, "{e0cbf06c") || strstr(path, "bth") || strstr(path, "BTH")) {
+                                    g_sonyIsBluetooth = TRUE;
+                                }
+                                LogMsg("[SonyHID] Auto-detected Sony DualSense (PS5) (VID=0x%04X, PID=0x%04X, Conn=%s)\n",
+                                       attr.VendorID, attr.ProductID, g_sonyIsBluetooth ? "Bluetooth" : "USB");
                                 hFound = h;
                                 free(pDetail);
                                 break;
                             } else if (attr.ProductID == 0x05C4 || attr.ProductID == 0x09CC) {
                                 g_sonyDevType = SONY_DEV_DUALSHOCK4;
-                                LogMsg("[SonyHID] Auto-detected Sony DualShock 4 (PS4) (VID=0x%04X, PID=0x%04X)\n",
-                                       attr.VendorID, attr.ProductID);
+                                if (strstr(path, "{e0cbf06c") || strstr(path, "bth") || strstr(path, "BTH")) {
+                                    g_sonyIsBluetooth = TRUE;
+                                }
+                                LogMsg("[SonyHID] Auto-detected Sony DualShock 4 (PS4) (VID=0x%04X, PID=0x%04X, Conn=%s)\n",
+                                       attr.VendorID, attr.ProductID, g_sonyIsBluetooth ? "Bluetooth" : "USB");
                                 hFound = h;
                                 free(pDetail);
                                 break;
@@ -496,60 +514,101 @@ static volatile BYTE g_lastSentBlue = 0xFF;
 
 static void SendDualSenseHardwareReport(HANDLE hDev, BYTE leftMotor, BYTE rightMotor) {
     if (g_sonyDevType == SONY_DEV_DUALSENSE) {
-        BYTE report[78];
-        memset(report, 0, sizeof(report));
+        if (!g_sonyIsBluetooth) {
+            // ================================================================
+            // DUALSENSE USB MODE (Report ID 0x02, 64 bytes standard)
+            // ================================================================
+            BYTE report[64];
+            memset(report, 0, sizeof(report));
 
-        report[0] = 0x31; // Report ID
-        report[1] = 0x02; // Config tag
-        report[2] = 0xFF; // Enable motors + triggers
-        report[3] = 0x1 | 0x2 | 0x4 | 0x10 | 0x40; // Enable LEDs and lightbar
-        report[4] = rightMotor; // High-frequency weak rumble
-        report[5] = leftMotor;  // Low-frequency strong rumble
+            report[0] = 0x02; // Report ID
+            report[1] = 0xFF; // valid_flag0 (motors + triggers)
+            report[2] = 0x1 | 0x2 | 0x4 | 0x10 | 0x40; // valid_flag1 (LEDs + lightbar)
+            report[3] = rightMotor; // High-frequency weak rumble (0-255)
+            report[4] = leftMotor;  // Low-frequency strong rumble (0-255)
 
-        // R2 (Aceleração / Troca de Marcha / Tiro de Arma):
-        report[11] = g_triggerR2Mode;
-        report[12] = (g_triggerR2Mode != 0) ? 0x02 : 0x00;
-        report[13] = g_triggerR2Param1;
-        report[14] = g_triggerR2Param2;
+            // R2 (Right Trigger):
+            report[11] = g_triggerR2Mode;
+            report[12] = g_triggerR2Param1;
+            report[13] = g_triggerR2Param2;
 
-        // L2 (Freio / ABS / Mira):
-        report[22] = g_triggerL2Mode;
-        report[23] = (g_triggerL2Mode != 0) ? 0x02 : 0x00;
-        report[24] = g_triggerL2Param1;
-        report[25] = g_triggerL2Param2;
+            // L2 (Left Trigger):
+            report[22] = g_triggerL2Mode;
+            report[23] = g_triggerL2Param1;
+            report[24] = g_triggerL2Param2;
 
-        // Lightbar & Player LEDs
-        report[40] = 0x02; // Uninterruptable LED
-        report[43] = 0x00;
-        report[44] = 0x00; // Brightness High
-        report[45] = 0x04; // Player 1 LED
-        report[46] = g_lightbarRed;
-        report[47] = g_lightbarGreen;
-        report[48] = g_lightbarBlue;
+            // Lightbar & LEDs:
+            report[39] = 0x02; // Uninterruptable LED
+            report[42] = 0x00; // Pulse options
+            report[43] = 0x00; // Brightness High
+            report[44] = 0x04; // Player 1 LED
+            report[45] = g_lightbarRed;
+            report[46] = g_lightbarGreen;
+            report[47] = g_lightbarBlue;
 
-        // CRC32 of 0xA2 + report[0..73]
-        BYTE crcBuf[75];
-        crcBuf[0] = 0xA2;
-        memcpy(crcBuf + 1, report, 74);
-        DWORD crc = ComputeCrc32(crcBuf, 75);
+            DWORD targetLen = (g_outputReportLength >= 48) ? g_outputReportLength : 64;
+            DWORD written = 0;
+            if (!WriteFile(hDev, report, targetLen, &written, NULL)) {
+                HidD_SetOutputReport(hDev, report, targetLen);
+            }
+        } else {
+            // ================================================================
+            // DUALSENSE BLUETOOTH MODE (Report ID 0x31, 78 bytes with CRC)
+            // ================================================================
+            BYTE report[78];
+            memset(report, 0, sizeof(report));
 
-        report[74] = (BYTE)(crc & 0xFF);
-        report[75] = (BYTE)((crc >> 8) & 0xFF);
-        report[76] = (BYTE)((crc >> 16) & 0xFF);
-        report[77] = (BYTE)((crc >> 24) & 0xFF);
+            report[0] = 0x31; // Report ID
+            report[1] = 0x02; // Tag / Sequence
+            report[2] = 0xFF; // valid_flag0 (motors + triggers)
+            report[3] = 0x1 | 0x2 | 0x4 | 0x10 | 0x40; // valid_flag1 (LEDs + lightbar)
+            report[4] = rightMotor; // High-frequency weak rumble
+            report[5] = leftMotor;  // Low-frequency strong rumble
 
-        DWORD written = 0;
-        WriteFile(hDev, report, 78, &written, NULL);
+            // R2 (Right Trigger):
+            report[12] = g_triggerR2Mode;
+            report[13] = g_triggerR2Param1;
+            report[14] = g_triggerR2Param2;
+
+            // L2 (Left Trigger):
+            report[23] = g_triggerL2Mode;
+            report[24] = g_triggerL2Param1;
+            report[25] = g_triggerL2Param2;
+
+            // Lightbar & LEDs:
+            report[40] = 0x02; // Uninterruptable LED
+            report[43] = 0x00;
+            report[44] = 0x00; // Brightness High
+            report[45] = 0x04; // Player 1 LED
+            report[46] = g_lightbarRed;
+            report[47] = g_lightbarGreen;
+            report[48] = g_lightbarBlue;
+
+            // CRC32 of 0xA2 + report[0..73]
+            BYTE crcBuf[75];
+            crcBuf[0] = 0xA2;
+            memcpy(crcBuf + 1, report, 74);
+            DWORD crc = ComputeCrc32(crcBuf, 75);
+
+            report[74] = (BYTE)(crc & 0xFF);
+            report[75] = (BYTE)((crc >> 8) & 0xFF);
+            report[76] = (BYTE)((crc >> 16) & 0xFF);
+            report[77] = (BYTE)((crc >> 24) & 0xFF);
+
+            DWORD written = 0;
+            if (!WriteFile(hDev, report, 78, &written, NULL)) {
+                HidD_SetOutputReport(hDev, report, 78);
+            }
+        }
     } else if (g_sonyDevType == SONY_DEV_DUALSHOCK4) {
         if (g_sonyIsBluetooth) {
-            // DS4 Bluetooth Output Report 0x11 (78 bytes)
             BYTE report[78];
             memset(report, 0, sizeof(report));
             report[0] = 0x11;
             report[1] = 0xC0 | 0x04;
             report[3] = 0x03; // Enable rumble + lightbar
-            report[6] = rightMotor; // High-frequency weak rumble
-            report[7] = leftMotor;  // Low-frequency strong rumble
+            report[6] = rightMotor;
+            report[7] = leftMotor;
             report[8] = g_lightbarRed;
             report[9] = g_lightbarGreen;
             report[10] = g_lightbarBlue;
@@ -565,21 +624,25 @@ static void SendDualSenseHardwareReport(HANDLE hDev, BYTE leftMotor, BYTE rightM
             report[77] = (BYTE)((crc >> 24) & 0xFF);
 
             DWORD written = 0;
-            WriteFile(hDev, report, 78, &written, NULL);
+            if (!WriteFile(hDev, report, 78, &written, NULL)) {
+                HidD_SetOutputReport(hDev, report, 78);
+            }
         } else {
-            // DS4 USB Output Report 0x05 (32 bytes)
             BYTE report[32];
             memset(report, 0, sizeof(report));
             report[0] = 0x05;
-            report[1] = 0x07; // Enable rumble right, left, LED
+            report[1] = 0x07;
             report[4] = rightMotor;
             report[5] = leftMotor;
             report[6] = g_lightbarRed;
             report[7] = g_lightbarGreen;
             report[8] = g_lightbarBlue;
 
+            DWORD targetLen = (g_outputReportLength >= 32) ? g_outputReportLength : 32;
             DWORD written = 0;
-            WriteFile(hDev, report, 32, &written, NULL);
+            if (!WriteFile(hDev, report, targetLen, &written, NULL)) {
+                HidD_SetOutputReport(hDev, report, targetLen);
+            }
         }
     }
 }
@@ -1276,15 +1339,19 @@ static void ProcessCustomController(CPad* pad) {
             g_triggerR2Param1 = 25; // Ponto do clique
             g_triggerR2Param2 = 175;// Força mecânica do gatilho
             g_triggerL2Mode = 0x00; // L2 100% livre para puxar a mira livremente!
-        } else if (timeCanRun <= 0.5f) {
+        } else if (timeCanRun <= 1.0f) {
             // CJ Exausto / Sem fôlego (Stamina zerada): Gatilhos pesados e trêmulos simulando cansaço físico
-            BOOL tiredPulse = ((now / 120) % 2 == 0);
+            BOOL tiredPulse = ((now / 150) % 2 == 0);
             g_triggerR2Mode = 0x01; // Continuous Resistance
             g_triggerR2Param1 = 10;
-            g_triggerR2Param2 = tiredPulse ? 170 : 70;
+            g_triggerR2Param2 = tiredPulse ? 190 : 70;
             g_triggerL2Mode = 0x01;
             g_triggerL2Param1 = 10;
-            g_triggerL2Param2 = tiredPulse ? 170 : 70;
+            g_triggerL2Param2 = tiredPulse ? 190 : 70;
+            if (tiredPulse) {
+                if (s_rumbleLeft < 80) s_rumbleLeft = 80;
+                if (now + 75 > s_rumbleUntil) s_rumbleUntil = now + 75;
+            }
         } else {
             // Desarmado / Faca / Normal: Gatilhos 100% livres e macios
             g_triggerR2Mode = 0x00; g_triggerR2Param1 = 0; g_triggerR2Param2 = 0;
@@ -1320,28 +1387,46 @@ static void ProcessCustomController(CPad* pad) {
         // EM VEÍCULO (IN VEHICLE)
         // ====================================================================
         float vehHealth = *(float*)((BYTE*)pVeh + 0x4C0);
-        BYTE curGear = *(BYTE*)((BYTE*)pVeh + 0x4A8) & 7;
+        BYTE curGear = *(BYTE*)((BYTE*)pVeh + 0x4B4) & 7; // VALIDATE_OFFSET(CVehicle, m_nCurrentGear, 0x4B4)
         WORD modelId = *(WORD*)((BYTE*)pVeh + 0x22);
 
-        // A. TROCA DE MARCHA (GEAR SHIFT SNAP NO R2)
+        // Velocidade real do veículo para cálculo dinâmico de ABS:
+        float vx = *(float*)((BYTE*)pVeh + 0x44);
+        float vy = *(float*)((BYTE*)pVeh + 0x48);
+        float vz = *(float*)((BYTE*)pVeh + 0x4C);
+        float speedSq = (vx * vx) + (vy * vy) + (vz * vz);
+        BOOL isMovingFast = (speedSq > 0.035f); // Acima de ~20 km/h
+
+        // A. TROCA DE MARCHA (GEAR SHIFT SNAP NO R2 + TRANCO MECÂNICO)
+        static void* s_lastVeh = NULL;
         static BYTE s_lastGear = 0;
         static DWORD s_gearSnapUntil = 0;
+        if (pVeh != s_lastVeh) {
+            s_lastVeh = pVeh;
+            s_lastGear = curGear;
+        }
+
         if (!isBicycle && curGear != s_lastGear) {
-            if (curGear > 1 && s_lastGear >= 1) {
-                s_gearSnapUntil = now + 120; // Tranco de 120ms no R2
-                if (s_rumbleRight < 130) s_rumbleRight = 130;
-                if (now + 60 > s_rumbleUntil) s_rumbleUntil = now + 60;
+            if (curGear >= 1 && s_lastGear >= 1) {
+                s_gearSnapUntil = now + 140; // Tranco de 140ms no R2
+                if (s_rumbleRight < 190) s_rumbleRight = 190;
+                if (s_rumbleLeft < 120) s_rumbleLeft = 120;
+                if (now + 100 > s_rumbleUntil) s_rumbleUntil = now + 100;
             }
             s_lastGear = curGear;
         }
 
         // B. DANO CRÍTICO DO MOTOR (HP < 300: MOTOR FALHANDO / BATENDO BIELA)
         if (vehHealth > 0.0f && vehHealth < 300.0f) {
-            // Vibração fraca e engasgada irregular
-            if ((now / 160) % 3 == 0) {
+            // Vibração irregular intermitente simulando falha de ignição
+            int phase = (now / 150) % 4;
+            if (phase == 0) {
+                if (s_rumbleLeft < 140) s_rumbleLeft = 140;
+                if (s_rumbleRight < 70) s_rumbleRight = 70;
+                if (now + 80 > s_rumbleUntil) s_rumbleUntil = now + 80;
+            } else if (phase == 2) {
                 if (s_rumbleLeft < 85) s_rumbleLeft = 85;
-                if (s_rumbleRight < 40) s_rumbleRight = 40;
-                if (now + 70 > s_rumbleUntil) s_rumbleUntil = now + 70;
+                if (now + 60 > s_rumbleUntil) s_rumbleUntil = now + 60;
             }
         }
 
@@ -1352,10 +1437,14 @@ static void ProcessCustomController(CPad* pad) {
                 BYTE* pPlayerData = *(BYTE**)((BYTE*)pPlayerPed + 0x480);
                 if (pPlayerData) timeCanRun = *(float*)(pPlayerData + 0x18);
             }
-            if (timeCanRun <= 0.5f) {
-                BOOL tiredPulse = ((now / 120) % 2 == 0);
-                g_triggerR2Mode = 0x01; g_triggerR2Param1 = 10; g_triggerR2Param2 = tiredPulse ? 160 : 60;
-                g_triggerL2Mode = 0x01; g_triggerL2Param1 = 10; g_triggerL2Param2 = tiredPulse ? 160 : 60;
+            if (timeCanRun <= 1.0f) {
+                BOOL tiredPulse = ((now / 150) % 2 == 0);
+                g_triggerR2Mode = 0x01; g_triggerR2Param1 = 10; g_triggerR2Param2 = tiredPulse ? 180 : 70;
+                g_triggerL2Mode = 0x01; g_triggerL2Param1 = 10; g_triggerL2Param2 = tiredPulse ? 180 : 70;
+                if (tiredPulse) {
+                    if (s_rumbleLeft < 80) s_rumbleLeft = 80;
+                    if (now + 75 > s_rumbleUntil) s_rumbleUntil = now + 75;
+                }
             } else {
                 g_triggerR2Mode = 0; g_triggerR2Param1 = 0; g_triggerR2Param2 = 0;
                 g_triggerL2Mode = 0; g_triggerL2Param1 = 0; g_triggerL2Param2 = 0;
@@ -1384,7 +1473,7 @@ static void ProcessCustomController(CPad* pad) {
                 // Snap mecânico de troca de marcha no R2!
                 g_triggerR2Mode = 0x02; // Rigid Stop
                 g_triggerR2Param1 = 10;
-                g_triggerR2Param2 = 220;
+                g_triggerR2Param2 = 230;
             } else {
                 // Aceleração suave e progressiva
                 g_triggerR2Mode = 0x00;
@@ -1398,17 +1487,21 @@ static void ProcessCustomController(CPad* pad) {
                             modelId == 431 || modelId == 432 || modelId == 437 || modelId == 443 ||
                             modelId == 514 || modelId == 515 || modelId == 524 || modelId == 573);
 
-            if (gp.l2 > 80) {
-                // Frenagem forte: Simulação de ABS pulsante no pedal/gatilho L2!
-                BOOL absPulse = ((now / 70) % 2 == 0);
+            if (gp.l2 > 70 && isMovingFast) {
+                // Frenagem forte em movimento: Simulação de ABS pulsante no pedal/gatilho L2!
+                BOOL absPulse = ((now / 60) % 2 == 0);
                 g_triggerL2Mode = 0x01; // Continuous Resistance
                 g_triggerL2Param1 = absPulse ? 35 : 10;
-                g_triggerL2Param2 = absPulse ? 210 : 70;
-            } else if (isHeavy) {
-                // Caminhão pesado: freio mais rígido e com maior resistência
+                g_triggerL2Param2 = absPulse ? 230 : 60;
+                if (absPulse) {
+                    if (s_rumbleLeft < 130) s_rumbleLeft = 130;
+                    if (now + 50 > s_rumbleUntil) s_rumbleUntil = now + 50;
+                }
+            } else if (isHeavy && gp.l2 > 10) {
+                // Caminhão pesado: freio mais rígido e com maior resistência mecânica
                 g_triggerL2Mode = 0x01;
                 g_triggerL2Param1 = 15;
-                g_triggerL2Param2 = 160;
+                g_triggerL2Param2 = 180;
             } else {
                 // Carro normal: freio suave e macio
                 g_triggerL2Mode = 0x00;
@@ -1459,11 +1552,11 @@ static void ProcessCustomController(CPad* pad) {
     // ========================================================================
     // 5. VIBRAÇÃO HÁPTICA / RUMBLE REAL NO DUALSENSE
     // ========================================================================
-    // Disparo de tiro com R2: pulso de recuo seco e rápido (85ms)
+    // Disparo de tiro com R2: pulso de recuo seco e rápido (95ms)
     if (!isVehicle && gp.r2 > 50 && s_lastR2 <= 50) {
-        s_rumbleLeft = 140;
-        s_rumbleRight = 240;
-        s_rumbleUntil = now + 85;
+        s_rumbleLeft = 180;
+        s_rumbleRight = 255;
+        s_rumbleUntil = now + 95;
     }
     s_lastR2 = gp.r2;
 
