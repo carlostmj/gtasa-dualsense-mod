@@ -236,6 +236,53 @@ static BOOL __attribute__((thiscall)) Hooked_ControlGunMove(void* thisTask, cons
     return TRUE;
 }
 
+typedef struct {
+    float x;
+    float y;
+    float z;
+} CVector_t;
+
+// Verifica se o alvo está dentro do cone de assistência de mira (próximo à retícula/crosshair)
+// isAcquisition = TRUE: cone de ~20 graus (dot >= 0.94) para travar só se estiver olhando perto do inimigo
+// isAcquisition = FALSE: cone de ~36 graus (dot >= 0.80) para rastrear sem soltar instantaneamente
+static BOOL IsTargetInAimAssistCone(void* pPlayer, void* pTarget, BOOL isAcquisition) {
+    if (!pPlayer || !pTarget) return FALSE;
+
+    // Obtém posição do alvo (m_matrix->pos ou entity->pos)
+    void* targetMatrix = *(void**)((BYTE*)pTarget + 0x14);
+    CVector_t targetPos;
+    if (targetMatrix) {
+        targetPos = *(CVector_t*)((BYTE*)targetMatrix + 0x30);
+    } else {
+        targetPos = *(CVector_t*)((BYTE*)pTarget + 0x04);
+    }
+    targetPos.z += 0.35f; // Mira na altura do torso
+
+    // Câmera ativa do GTA SA (TheCamera @ 0x00B6F028, CCam[0] @ offset 0x174)
+    BYTE* pCam0 = (BYTE*)0x00B6F028 + 0x174;
+    CVector_t camFront = *(CVector_t*)(pCam0 + 0x190); // m_vecFront
+    CVector_t camPos   = *(CVector_t*)(pCam0 + 0x19C); // m_vecSource
+
+    float dx = targetPos.x - camPos.x;
+    float dy = targetPos.y - camPos.y;
+    float dz = targetPos.z - camPos.z;
+    float distSq = dx * dx + dy * dy + dz * dz;
+
+    // Distância mínima (1m) e máxima de assistência (45m)
+    if (distSq < 1.0f || distSq > (45.0f * 45.0f)) return FALSE;
+
+    float dist = sqrtf(distSq);
+    float dirX = dx / dist;
+    float dirY = dy / dist;
+    float dirZ = dz / dist;
+
+    // Produto escalar com o vetor frontal da câmera
+    float dot = dirX * camFront.x + dirY * camFront.y + dirZ * camFront.z;
+
+    float minDot = isAcquisition ? 0.94f : 0.80f;
+    return (dot >= minDot);
+}
+
 static void EnsureMoveWhileAiming(void) {
     static DWORD s_lastCheck = 0;
     DWORD now = GetTickCount();
@@ -1104,12 +1151,11 @@ static void ProcessCustomController(CPad* pad) {
     // 2. Garante que todas as 80 armas tenham bMoveAim e bMoveFire (andar e esquivar mirando/atirando)
     EnsureMoveWhileAiming();
 
-    // 3. Ativa modo Joypad do console para habilitar mira automatica (Auto-Aim / Lock-On)
-    // NOTA: 0x00B6EC2E e CCamera::m_bUseMouse3rdPerson. Tem que ser 0 para o GTA usar o Lock-On de console!
-    *(BYTE*)0x00B6EC2E = 0;
-    pad->Mode = 0;                     // Mode 0: Padrao classico de console (RightShoulder1 = Mira Lock-on)
-    *(BYTE*)(0x00BA6748 + 0xD0) = 0;   // CMenuManager: 0 = Joypad
-    *(BYTE*)0x00BA6818 = 0;            // ControlsManager: 0 = Joypad
+    // 3. Mantém suporte simultâneo a Teclado + Mouse e Controle
+    *(BYTE*)0x00B6EC2E = 1;            // CCamera::m_bUseMouse3rdPerson: 1 = Câmera livre do mouse sempre ativa
+    pad->Mode = 0;                     // Mode 0: Layout padrão
+    *(BYTE*)(0x00BA6748 + 0xD0) = 1;   // CMenuManager: 1 = Mouse + Teclas
+    *(BYTE*)0x00BA6818 = 1;            // ControlsManager: 1 = Mouse + Teclas
 
     void* pVeh = FUNC_FindPlayerVehicle(-1, FALSE);
     BOOL isVehicle = (pVeh != NULL);
@@ -1124,18 +1170,23 @@ static void ProcessCustomController(CPad* pad) {
         }
     }
 
-    // ANALOG STICK MOVEMENT (Left Stick)
-    // Se o controle for movido alem da deadzone, aplica a direcao do controle.
-    // Se estiver neutro, mantem o teclado (WASD / setas) intacto!
-    if (abs(gp.lx) > 8) {
-        pad->NewState.LeftStickX = gp.lx;
+    // ANALOG STICK MOVEMENT (Left Stick) vs TECLADO (WASD):
+    // Deadzone de 25 para evitar que ruído do controle na mesa anule as teclas W, A, S, D
+    int deadzone = 25;
+    if (abs(gp.lx) > deadzone) {
+        if (abs(gp.lx) >= abs(pad->NewState.LeftStickX)) {
+            pad->NewState.LeftStickX = gp.lx;
+        }
     }
-    if (abs(gp.ly) > 8) {
-        pad->NewState.LeftStickY = gp.ly;
+    if (abs(gp.ly) > deadzone) {
+        if (abs(gp.ly) >= abs(pad->NewState.LeftStickY)) {
+            pad->NewState.LeftStickY = gp.ly;
+        }
     }
 
-    // ANALOG CAMERA LOOK & TARGET SWITCHING (Right Stick -> Mouse Deltas & Pad Stick)
-    if (gp.rx != 0 || gp.ry != 0) {
+    // ANALOG CAMERA LOOK (Right Stick -> Mouse Deltas & Pad Stick)
+    // Só envia deltas para o mouse se o analógico direito estiver sendo movido intencionalmente
+    if (abs(gp.rx) > 15 || abs(gp.ry) > 15) {
         pad->NewState.RightStickX = gp.rx;
         pad->NewState.RightStickY = gp.ry;
 
@@ -1167,35 +1218,60 @@ static void ProcessCustomController(CPad* pad) {
         // A PÉ (ON FOOT)
         // ====================================================================
         
-        // L2: MIRA AUTOMÁTICA DE CONSOLE (Auto-Aim / Lock-On com retículo clássico colorido)
+        // MIRA ASSISTIDA (L2 no Controle OU Botão Direito do Mouse):
+        BOOL bAimBtn = (gp.l2 > 30) || (pad->NewState.RightShoulder1 > 0);
         if (gp.l2 > 30) {
             pad->NewState.RightShoulder1 = 255;
-
-            void* pPlayer = FUNC_FindPlayerPed(-1);
-            if (pPlayer) {
-                void* pTarget = *(void**)((BYTE*)pPlayer + 0x79C); // m_pPlayerTargettedPed
-                if (!pTarget) {
-                    // Invoca o Lock-On nativo do GTA se ainda nao tem alvo selecionado
-                    ((bool (__attribute__((thiscall)) *)(void*))0x0060DC50)(pPlayer);
-                } else {
-                    // Alterna entre alvos com o analogico direito (direita/esquerda)
-                    static DWORD s_lastTargetSwitch = 0;
-                    if (now - s_lastTargetSwitch > 220) {
-                        if (gp.rx > 45) {
-                            s_lastTargetSwitch = now;
-                            ((bool (__attribute__((thiscall)) *)(void*, void*, bool))0x0060E530)(pPlayer, pTarget, false);
-                        } else if (gp.rx < -45) {
-                            s_lastTargetSwitch = now;
-                            ((bool (__attribute__((thiscall)) *)(void*, void*, bool))0x0060E530)(pPlayer, pTarget, true);
-                        }
-                    }
-                }
-            }
         }
 
         // R2: ATIRAR / DISPARAR (Fire Weapon)
         if (gp.r2 > 30) {
             pad->NewState.ButtonCircle = 255;
+        }
+
+        if (bAimBtn && IsPlayerHoldingFirearm()) {
+            void* pPlayer = FUNC_FindPlayerPed(-1);
+            if (pPlayer) {
+                void* pTarget = *(void**)((BYTE*)pPlayer + 0x79C); // m_pPlayerTargettedPed
+                if (!pTarget) {
+                    // Só trava o alvo se a retícula estiver próxima de algum inimigo (cone estreito ~20°)
+                    BOOL found = ((bool (__attribute__((thiscall)) *)(void*))0x0060DC50)(pPlayer);
+                    if (found) {
+                        void* candidate = *(void**)((BYTE*)pPlayer + 0x79C);
+                        if (candidate && !IsTargetInAimAssistCone(pPlayer, candidate, TRUE)) {
+                            // Inimigo fora do cone de mira próxima -> rejeita para manter a mira livre!
+                            ((void (__attribute__((thiscall)) *)(void*))0x0060D5A0)(pPlayer); // ClearWeaponTarget
+                        }
+                    }
+                } else {
+                    // Já possui alvo: verifica se ainda está vivo e dentro da área de assistência (~36°)
+                    float health = *(float*)((BYTE*)pTarget + 0x540);
+                    if (health <= 0.0f || !IsTargetInAimAssistCone(pPlayer, pTarget, FALSE)) {
+                        ((void (__attribute__((thiscall)) *)(void*))0x0060D5A0)(pPlayer); // ClearWeaponTarget
+                    } else {
+                        // Alterna entre alvos se inclinar o analógico direito
+                        static DWORD s_lastTargetSwitch = 0;
+                        if (now - s_lastTargetSwitch > 250) {
+                            if (gp.rx > 55) {
+                                s_lastTargetSwitch = now;
+                                ((bool (__attribute__((thiscall)) *)(void*, void*, bool))0x0060E530)(pPlayer, pTarget, false);
+                            } else if (gp.rx < -55) {
+                                s_lastTargetSwitch = now;
+                                ((bool (__attribute__((thiscall)) *)(void*, void*, bool))0x0060E530)(pPlayer, pTarget, true);
+                            }
+                        }
+                    }
+                }
+            }
+        } else {
+            // Não está mirando: limpa qualquer alvo travado para deixar a câmera 100% livre
+            void* pPlayer = FUNC_FindPlayerPed(-1);
+            if (pPlayer) {
+                void* pTarget = *(void**)((BYTE*)pPlayer + 0x79C);
+                if (pTarget) {
+                    ((void (__attribute__((thiscall)) *)(void*))0x0060D5A0)(pPlayer); // ClearWeaponTarget
+                }
+            }
         }
 
         // BOTÕES DE FACE (Preserva teclado se pressionado)
@@ -1389,6 +1465,17 @@ static void InstallHook(void) {
         LogMsg("[Hook] ControlGunMove JMP hook OK: 0x0061E0C0 -> 0x%08X\n", myAddr);
     } else {
         LogMsg("[Hook] FAILED VirtualProtect at 0x0061E0C0\n");
+    }
+
+    // 3. Patch NOP em 0x00685A7A (ClearWeaponTarget no ProcessPlayerWeapon quando mouse está ativo):
+    // Permite que o mouse e teclado funcionem com mira livre enquanto a mira assistida atua
+    // somente quando o alvo estiver próximo ao centro da tela!
+    if (VirtualProtect((LPVOID)0x00685A7A, 5, PAGE_EXECUTE_READWRITE, &oldProtect)) {
+        memset((void*)0x00685A7A, 0x90, 5);
+        VirtualProtect((LPVOID)0x00685A7A, 5, oldProtect, &oldProtect);
+        LogMsg("[Hook] NOP 0x00685A7A (ClearWeaponTarget mouse-block) OK\n");
+    } else {
+        LogMsg("[Hook] FAILED VirtualProtect at 0x00685A7A\n");
     }
 }
 
