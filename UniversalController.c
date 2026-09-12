@@ -1020,6 +1020,9 @@ static BOOL IsPlayerHoldingFirearm(void) {
 // Controller Processing & Engine Injection
 // ============================================================================
 
+static bool s_customSniperZoomIn = false;
+static bool s_customSniperZoomOut = false;
+
 static DWORD g_lastInputLogTime = 0;
 
 static void ProcessCustomController(CPad* pad) {
@@ -1233,6 +1236,8 @@ static void ProcessCustomController(CPad* pad) {
         }
 
         // Silence rumble while in menu
+        s_customSniperZoomIn = false;
+        s_customSniperZoomOut = false;
         g_targetLeftMotor = 0;
         g_targetRightMotor = 0;
         return;
@@ -1380,9 +1385,63 @@ static void ProcessCustomController(CPad* pad) {
         if (gp.btnTriangle) pad->NewState.ButtonTriangle = 255; // Entrar no veículo
         if (gp.btnCircle && gp.r2 <= 30) pad->NewState.ButtonCircle = 255; // Soco / Combate corpo a corpo
 
-        // D-PAD
-        if (gp.dpadUp)    pad->NewState.DPadUp    = 255;
-        if (gp.dpadDown)  pad->NewState.DPadDown  = 255;
+        // --------------------------------------------------------------------
+        // ZOOM DA SNIPER / CÂMERA / ROCKET LAUNCHER COM D-PAD (SETAS CIMA / BAIXO)
+        // --------------------------------------------------------------------
+        BYTE activeCam = *(BYTE*)0x00B6F081;
+        if (activeCam > 2) activeCam = 0;
+        BYTE* pCam = (BYTE*)(0x00B6F19C + activeCam * 0x238);
+        short camMode = *(short*)(pCam + 0x0C);
+        BOOL isScopedCam = (camMode == 39 || camMode == 46 || camMode == 7);
+
+        BOOL isScopedWeapon = FALSE;
+        BYTE* pPedAim = *(BYTE**)0x00B7CD98; // CWorld::Players[0].m_pPed
+        if (pPedAim) {
+            BYTE slot = *(BYTE*)(pPedAim + 0x718);
+            if (slot <= 12) {
+                DWORD weaponType = *(DWORD*)(pPedAim + 0x5A0 + slot * 0x1C);
+                if (weaponType == 34 || weaponType == 43 || weaponType == 35 || weaponType == 36) {
+                    isScopedWeapon = TRUE;
+                }
+            }
+        }
+
+        BOOL isAimingScoped = isScopedCam || (isScopedWeapon && (gp.l2 > 30 || pad->NewState.RightShoulder1 > 0));
+
+        if (isAimingScoped) {
+            if (gp.dpadUp) {
+                s_customSniperZoomIn = true;
+                s_customSniperZoomOut = false;
+                // Feedback tátil no limite de zoom máximo (15.0 graus)
+                float curFov = *(float*)(pCam + 0xB4);
+                if (curFov <= 15.2f) {
+                    if (s_rumbleRight < 90) s_rumbleRight = 90;
+                    if (now + 40 > s_rumbleUntil) s_rumbleUntil = now + 40;
+                }
+            } else if (gp.dpadDown) {
+                s_customSniperZoomIn = false;
+                s_customSniperZoomOut = true;
+                // Feedback tátil no limite de zoom mínimo (70.0 graus)
+                float curFov = *(float*)(pCam + 0xB4);
+                if (curFov >= 69.8f) {
+                    if (s_rumbleLeft < 90) s_rumbleLeft = 90;
+                    if (now + 40 > s_rumbleUntil) s_rumbleUntil = now + 40;
+                }
+            } else {
+                s_customSniperZoomIn = false;
+                s_customSniperZoomOut = false;
+            }
+        } else {
+            s_customSniperZoomIn = false;
+            s_customSniperZoomOut = false;
+        }
+
+        // D-PAD:
+        // Ao mirar com arma telescópica, NÃO passa Up/Down para a engine para não falar comandos de gangue
+        if (!isAimingScoped) {
+            if (gp.dpadUp)    pad->NewState.DPadUp    = 255;
+            if (gp.dpadDown)  pad->NewState.DPadDown  = 255;
+        }
         if (gp.dpadLeft)  pad->NewState.DPadLeft  = 255;
         if (gp.dpadRight) pad->NewState.DPadRight = 255;
 
@@ -1402,6 +1461,8 @@ static void ProcessCustomController(CPad* pad) {
         // ====================================================================
         // EM VEÍCULO (IN VEHICLE)
         // ====================================================================
+        s_customSniperZoomIn = false;
+        s_customSniperZoomOut = false;
         float vehHealth = *(float*)((BYTE*)pVeh + 0x4C0);
         BYTE curGear = *(BYTE*)((BYTE*)pVeh + 0x4B4) & 7; // VALIDATE_OFFSET(CVehicle, m_nCurrentGear, 0x4B4)
         WORD modelId = *(WORD*)((BYTE*)pVeh + 0x22);
@@ -1617,6 +1678,56 @@ static void ProcessCustomController(CPad* pad) {
 
 static BYTE g_origPad0[5];
 
+
+// ============================================================================
+// Sniper Rifle & Camera Zoom Hooks (D-Pad UP / DOWN Zooming)
+// ============================================================================
+#define ADDR_HOOK_SNIPER_ZOOM_IN   0x00540B30
+#define ADDR_HOOK_SNIPER_ZOOM_OUT  0x00540B80
+
+
+static bool Orig_SniperZoomIn(CPad* pad) {
+    if (!pad) return false;
+    if (pad->DisablePlayerControls != 0) return false;
+    short mode = pad->Mode;
+    if (mode == 2) {
+        return (pad->NewState.ButtonTriangle != 0);
+    }
+    if (mode >= 0 && mode <= 3) {
+        return (pad->NewState.LeftShoulder2 != 0 || pad->NewState.ButtonSquare != 0);
+    }
+    return false;
+}
+
+static bool Orig_SniperZoomOut(CPad* pad) {
+    if (!pad) return false;
+    if (pad->DisablePlayerControls != 0) return false;
+    short mode = pad->Mode;
+    if (mode == 2) {
+        return (pad->NewState.ButtonSquare != 0);
+    }
+    if (mode >= 0 && mode <= 3) {
+        return (pad->NewState.RightShoulder2 != 0 || pad->NewState.ButtonCross != 0);
+    }
+    return false;
+}
+
+static bool __attribute__((thiscall)) Hooked_SniperZoomIn(void* thisPad) {
+    CPad* pad = (CPad*)thisPad;
+    if (pad == (CPad*)0x00B73458 && s_customSniperZoomIn) {
+        return true;
+    }
+    return Orig_SniperZoomIn(pad);
+}
+
+static bool __attribute__((thiscall)) Hooked_SniperZoomOut(void* thisPad) {
+    CPad* pad = (CPad*)thisPad;
+    if (pad == (CPad*)0x00B73458 && s_customSniperZoomOut) {
+        return true;
+    }
+    return Orig_SniperZoomOut(pad);
+}
+
 typedef void (__attribute__((thiscall)) *tCPadUpdate)(void* thisPad, int padNum);
 
 // Replacement for the CALL to CPad::Update(pad0)
@@ -1677,6 +1788,35 @@ static void InstallHook(void) {
     } else {
         LogMsg("[Hook] FAILED VirtualProtect at 0x0060DC50\n");
     }
+
+    // 4. Hook JMP em CPad::SniperZoomIn (0x00540B30)
+    if (VirtualProtect((LPVOID)ADDR_HOOK_SNIPER_ZOOM_IN, 7, PAGE_EXECUTE_READWRITE, &oldProtect)) {
+        DWORD myAddr = (DWORD)Hooked_SniperZoomIn;
+        DWORD rel    = myAddr - (ADDR_HOOK_SNIPER_ZOOM_IN + 5);
+        *(BYTE* )ADDR_HOOK_SNIPER_ZOOM_IN       = 0xE9;
+        *(DWORD*)(ADDR_HOOK_SNIPER_ZOOM_IN + 1) = rel;
+        *(BYTE* )(ADDR_HOOK_SNIPER_ZOOM_IN + 5) = 0x90;
+        *(BYTE* )(ADDR_HOOK_SNIPER_ZOOM_IN + 6) = 0x90;
+        VirtualProtect((LPVOID)ADDR_HOOK_SNIPER_ZOOM_IN, 7, oldProtect, &oldProtect);
+        LogMsg("[Hook] CPad::SniperZoomIn JMP hook OK: 0x%08X -> our fn 0x%08X\n", ADDR_HOOK_SNIPER_ZOOM_IN, myAddr);
+    } else {
+        LogMsg("[Hook] FAILED VirtualProtect at 0x%08X\n", ADDR_HOOK_SNIPER_ZOOM_IN);
+    }
+
+    // 5. Hook JMP em CPad::SniperZoomOut (0x00540B80)
+    if (VirtualProtect((LPVOID)ADDR_HOOK_SNIPER_ZOOM_OUT, 7, PAGE_EXECUTE_READWRITE, &oldProtect)) {
+        DWORD myAddr = (DWORD)Hooked_SniperZoomOut;
+        DWORD rel    = myAddr - (ADDR_HOOK_SNIPER_ZOOM_OUT + 5);
+        *(BYTE* )ADDR_HOOK_SNIPER_ZOOM_OUT       = 0xE9;
+        *(DWORD*)(ADDR_HOOK_SNIPER_ZOOM_OUT + 1) = rel;
+        *(BYTE* )(ADDR_HOOK_SNIPER_ZOOM_OUT + 5) = 0x90;
+        *(BYTE* )(ADDR_HOOK_SNIPER_ZOOM_OUT + 6) = 0x90;
+        VirtualProtect((LPVOID)ADDR_HOOK_SNIPER_ZOOM_OUT, 7, oldProtect, &oldProtect);
+        LogMsg("[Hook] CPad::SniperZoomOut JMP hook OK: 0x%08X -> our fn 0x%08X\n", ADDR_HOOK_SNIPER_ZOOM_OUT, myAddr);
+    } else {
+        LogMsg("[Hook] FAILED VirtualProtect at 0x%08X\n", ADDR_HOOK_SNIPER_ZOOM_OUT);
+    }
+
 }
 
 // ============================================================================
@@ -1687,7 +1827,7 @@ BOOL WINAPI DllMain(HINSTANCE hinstDLL, DWORD fdwReason, LPVOID lpvReserved) {
     if (fdwReason == DLL_PROCESS_ATTACH) {
         DisableThreadLibraryCalls(hinstDLL);
         LogMsg("====================================================\n");
-        LogMsg(" Universal Controller Mod v2.7.0 (DualSense & DualShock 4 Direct)\n");
+        LogMsg(" Universal Controller Mod v2.8.0 (DualSense & DualShock 4 Direct)\n");
         LogMsg(" 100%% Pure Free Aim + PS5 Icons + Fixed Menu Navigation\n");
         LogMsg(" Built exclusively for GTA San Andreas\n");
         LogMsg("====================================================\n");
