@@ -2,6 +2,7 @@
 #include <windows.h>
 #include <mmsystem.h>
 #include <setupapi.h>
+#include <hidsdi.h>
 #include <stdlib.h>
 #include <stdio.h>
 #include <math.h>
@@ -233,47 +234,56 @@ static unsigned char g_lastSentLeftMotor = 0xFF;
 static unsigned char g_lastSentRightMotor = 0xFF;
 static DWORD g_lastOutputTick = 0;
 
-static const char* KNOWN_DS_PATH = "\\\\?\\hid#{00001124-0000-1000-8000-00805f9b34fb}_vid&0002054c_pid&0ce6#8&2a285c49&1&0000#{4d1e55b2-f16f-11cf-88cb-001111000030}";
+// ============================================================================
+// Dynamic HID & Controller Detection (Zero Hardcoded Keys/Paths)
+// ============================================================================
 
 static HANDLE FindAndOpenDualSenseDevice(void) {
-    HANDLE hFast = CreateFileA(KNOWN_DS_PATH,
-                               GENERIC_READ | GENERIC_WRITE,
-                               FILE_SHARE_READ | FILE_SHARE_WRITE,
-                               NULL, OPEN_EXISTING, 0, NULL);
-    if (hFast != INVALID_HANDLE_VALUE) {
-        LogMsg("[DualSense] Connected via direct hardware path!\n");
-        return hFast;
-    }
+    GUID hidGuid;
+    HidD_GetHidGuid(&hidGuid);
 
-    HDEVINFO devInfo = SetupDiGetClassDevsA(&GUID_DEVINTERFACE_HID, NULL, NULL, DIGCF_PRESENT | DIGCF_DEVICEINTERFACE);
-    if (devInfo == INVALID_HANDLE_VALUE) return INVALID_HANDLE_VALUE;
+    HDEVINFO devInfo = SetupDiGetClassDevsA(&hidGuid, NULL, NULL, DIGCF_PRESENT | DIGCF_DEVICEINTERFACE);
+    if (devInfo == INVALID_HANDLE_VALUE) {
+        return INVALID_HANDLE_VALUE;
+    }
 
     SP_DEVICE_INTERFACE_DATA devData;
     devData.cbSize = sizeof(SP_DEVICE_INTERFACE_DATA);
     HANDLE hFound = INVALID_HANDLE_VALUE;
 
-    for (DWORD i = 0; SetupDiEnumDeviceInterfaces(devInfo, NULL, &GUID_DEVINTERFACE_HID, i, &devData); i++) {
+    for (DWORD i = 0; SetupDiEnumDeviceInterfaces(devInfo, NULL, &hidGuid, i, &devData); i++) {
         DWORD detailSize = 0;
         SetupDiGetDeviceInterfaceDetailA(devInfo, &devData, NULL, 0, &detailSize, NULL);
         if (detailSize == 0) continue;
 
         PSP_DEVICE_INTERFACE_DETAIL_DATA_A pDetail = (PSP_DEVICE_INTERFACE_DETAIL_DATA_A)malloc(detailSize);
+        if (!pDetail) continue;
+
         pDetail->cbSize = sizeof(SP_DEVICE_INTERFACE_DETAIL_DATA_A);
 
         if (SetupDiGetDeviceInterfaceDetailA(devInfo, &devData, pDetail, detailSize, NULL, NULL)) {
-            if ((strstr(pDetail->DevicePath, "054c") || strstr(pDetail->DevicePath, "054C")) &&
-                (strstr(pDetail->DevicePath, "0ce6") || strstr(pDetail->DevicePath, "0CE6") ||
-                 strstr(pDetail->DevicePath, "0df2") || strstr(pDetail->DevicePath, "0DF2"))) {
-
-                HANDLE h = CreateFileA(pDetail->DevicePath,
+            // Check if device path belongs to Sony (VID 054C)
+            const char* path = pDetail->DevicePath;
+            if (strstr(path, "054c") || strstr(path, "054C") || strstr(path, "vid_054c") || strstr(path, "VID_054C")) {
+                HANDLE h = CreateFileA(path,
                                        GENERIC_READ | GENERIC_WRITE,
                                        FILE_SHARE_READ | FILE_SHARE_WRITE,
                                        NULL, OPEN_EXISTING, 0, NULL);
-
                 if (h != INVALID_HANDLE_VALUE) {
-                    hFound = h;
-                    free(pDetail);
-                    break;
+                    HIDD_ATTRIBUTES attr;
+                    attr.Size = sizeof(HIDD_ATTRIBUTES);
+                    if (HidD_GetAttributes(h, &attr)) {
+                        if (attr.VendorID == 0x054C &&
+                            (attr.ProductID == 0x0CE6 || attr.ProductID == 0x0DF2 ||
+                             attr.ProductID == 0x05C4 || attr.ProductID == 0x09CC)) {
+                            LogMsg("[DualSense] Auto-detected Sony Gamepad (VID=0x%04X, PID=0x%04X)\n",
+                                   attr.VendorID, attr.ProductID);
+                            hFound = h;
+                            free(pDetail);
+                            break;
+                        }
+                    }
+                    CloseHandle(h);
                 }
             }
         }
@@ -335,7 +345,7 @@ static void SendDualSenseHardwareReport(HANDLE hDev, BYTE leftMotor, BYTE rightM
 }
 
 static DWORD WINAPI DualSenseWorkerThread(LPVOID lpParam) {
-    LogMsg("[DualSense] Native HID Worker Thread started.\n");
+    LogMsg("[DualSense] Native HID Worker Thread started (Dynamic Discovery).\n");
 
     BYTE buf[78];
     DWORD readBytes = 0;
@@ -344,8 +354,7 @@ static DWORD WINAPI DualSenseWorkerThread(LPVOID lpParam) {
         if (g_hDualSense == INVALID_HANDLE_VALUE) {
             g_hDualSense = FindAndOpenDualSenseDevice();
             if (g_hDualSense != INVALID_HANDLE_VALUE) {
-                LogMsg("[DualSense] Connected successfully via Native HID Bluetooth!\n");
-                // Send initial trigger lock ("Curto e Forte")
+                LogMsg("[DualSense] Connected successfully via Dynamic Native HID!\n");
                 SendDualSenseHardwareReport(g_hDualSense, 0, 0);
                 g_lastSentLeftMotor = 0;
                 g_lastSentRightMotor = 0;
@@ -368,54 +377,196 @@ static DWORD WINAPI DualSenseWorkerThread(LPVOID lpParam) {
             SendDualSenseHardwareReport(g_hDualSense, g_lastSentLeftMotor, g_lastSentRightMotor);
         }
 
-        // 2. Read hardware input stream
-        if (ReadFile(g_hDualSense, buf, 78, &readBytes, NULL) && readBytes >= 11) {
-            g_dsInput.lx = (short)((int)buf[2] - 128);
-            g_dsInput.ly = (short)((int)buf[3] - 128);
-            g_dsInput.rx = (short)((int)buf[4] - 128);
-            g_dsInput.ry = (short)((int)buf[5] - 128);
-            g_dsInput.l2 = buf[6];
-            g_dsInput.r2 = buf[7];
+        // 2. Read hardware input stream (Supports BT report 0x31 and USB report 0x01)
+        if (ReadFile(g_hDualSense, buf, 78, &readBytes, NULL) && readBytes >= 10) {
+            int base = (buf[0] == 0x31) ? 2 : 1;
 
-            BYTE b9 = buf[9];
-            // Face buttons
-            g_dsInput.btnSquare   = (b9 & 0x10) != 0;
-            g_dsInput.btnCross    = (b9 & 0x20) != 0;
-            g_dsInput.btnCircle   = (b9 & 0x40) != 0;
-            g_dsInput.btnTriangle = (b9 & 0x80) != 0;
+            g_dsInput.lx = (short)((int)buf[base + 0] - 128);
+            g_dsInput.ly = (short)((int)buf[base + 1] - 128);
+            g_dsInput.rx = (short)((int)buf[base + 2] - 128);
+            g_dsInput.ry = (short)((int)buf[base + 3] - 128);
+            g_dsInput.l2 = buf[base + 4];
+            g_dsInput.r2 = buf[base + 5];
 
-            // D-Pad
-            BYTE dpad = b9 & 0x0F;
+            BYTE b0 = buf[base + 7];
+            g_dsInput.btnSquare   = (b0 & 0x10) != 0;
+            g_dsInput.btnCross    = (b0 & 0x20) != 0;
+            g_dsInput.btnCircle   = (b0 & 0x40) != 0;
+            g_dsInput.btnTriangle = (b0 & 0x80) != 0;
+
+            BYTE dpad = b0 & 0x0F;
             g_dsInput.dpadUp    = (dpad == 0 || dpad == 1 || dpad == 7);
             g_dsInput.dpadRight = (dpad == 1 || dpad == 2 || dpad == 3);
             g_dsInput.dpadDown  = (dpad == 3 || dpad == 4 || dpad == 5);
             g_dsInput.dpadLeft  = (dpad == 5 || dpad == 6 || dpad == 7);
 
-            BYTE b10 = buf[10];
-            g_dsInput.btnL1     = (b10 & 0x01) != 0;
-            g_dsInput.btnR1     = (b10 & 0x02) != 0;
-            g_dsInput.btnShare  = (b10 & 0x10) != 0; // Share / Create button
-            g_dsInput.btnStart  = (b10 & 0x20) != 0; // Options / Start button
-            g_dsInput.btnL3     = (b10 & 0x40) != 0;
-            g_dsInput.btnR3     = (b10 & 0x80) != 0;
+            BYTE b1 = buf[base + 8];
+            g_dsInput.btnL1     = (b1 & 0x01) != 0;
+            g_dsInput.btnR1     = (b1 & 0x02) != 0;
+            g_dsInput.btnL2     = (b1 & 0x04) != 0;
+            g_dsInput.btnR2     = (b1 & 0x08) != 0;
+            g_dsInput.btnShare  = (b1 & 0x10) != 0;
+            g_dsInput.btnStart  = (b1 & 0x20) != 0;
+            g_dsInput.btnL3     = (b1 & 0x40) != 0;
+            g_dsInput.btnR3     = (b1 & 0x80) != 0;
 
-            BYTE b11 = (readBytes > 11) ? buf[11] : 0;
-            g_dsInput.btnPS     = (b11 & 0x01) != 0; // PS Logo button
-            g_dsInput.btnTouch  = (b11 & 0x02) != 0; // Touchpad click
+            BYTE b2 = (readBytes > (DWORD)(base + 9)) ? buf[base + 9] : 0;
+            g_dsInput.btnPS     = (b2 & 0x01) != 0;
+            g_dsInput.btnTouch  = (b2 & 0x02) != 0;
             g_dsInput.btnSelect = g_dsInput.btnShare || g_dsInput.btnTouch;
 
             g_dsInput.connected = TRUE;
         } else {
+            DWORD err = GetLastError();
+            if (err == ERROR_DEVICE_NOT_CONNECTED || err == ERROR_GEN_FAILURE || err == ERROR_INVALID_HANDLE) {
+                LogMsg("[DualSense] Controller disconnected, scanning for reconnect...\n");
+                CloseHandle(g_hDualSense);
+                g_hDualSense = INVALID_HANDLE_VALUE;
+                g_dsInput.connected = FALSE;
+            }
             Sleep(5);
         }
     }
 
     if (g_hDualSense != INVALID_HANDLE_VALUE) {
-        SendDualSenseHardwareReport(g_hDualSense, 0, 0); // Release triggers
+        SendDualSenseHardwareReport(g_hDualSense, 0, 0);
         CloseHandle(g_hDualSense);
         g_hDualSense = INVALID_HANDLE_VALUE;
     }
     return 0;
+}
+
+// ============================================================================
+// Dynamic XInput & DirectInput Universal Fallback
+// ============================================================================
+
+typedef struct {
+    WORD wButtons;
+    BYTE bLeftTrigger;
+    BYTE bRightTrigger;
+    SHORT sThumbLX;
+    SHORT sThumbLY;
+    SHORT sThumbRX;
+    SHORT sThumbRY;
+} XINPUT_GAMEPAD_S;
+
+typedef struct {
+    DWORD dwPacketNumber;
+    XINPUT_GAMEPAD_S Gamepad;
+} XINPUT_STATE_S;
+
+typedef struct {
+    WORD wLeftMotorSpeed;
+    WORD wRightMotorSpeed;
+} XINPUT_VIBRATION_S;
+
+typedef DWORD (WINAPI *tXInputGetState)(DWORD dwUserIndex, XINPUT_STATE_S* pState);
+typedef DWORD (WINAPI *tXInputSetState)(DWORD dwUserIndex, XINPUT_VIBRATION_S* pVibration);
+
+static HMODULE g_hXInput = NULL;
+static tXInputGetState g_pfnXInputGetState = NULL;
+static tXInputSetState g_pfnXInputSetState = NULL;
+static BOOL g_xinputAttempted = FALSE;
+
+static void EnsureXInputLoaded(void) {
+    if (g_xinputAttempted) return;
+    g_xinputAttempted = TRUE;
+    const char* dlls[] = { "xinput1_4.dll", "xinput1_3.dll", "xinput9_1_0.dll" };
+    for (int i = 0; i < 3; i++) {
+        g_hXInput = LoadLibraryA(dlls[i]);
+        if (g_hXInput) {
+            g_pfnXInputGetState = (tXInputGetState)GetProcAddress(g_hXInput, "XInputGetState");
+            g_pfnXInputSetState = (tXInputSetState)GetProcAddress(g_hXInput, "XInputSetState");
+            if (g_pfnXInputGetState) {
+                LogMsg("[XInput] Dynamic fallback loader active (%s)\n", dlls[i]);
+                break;
+            }
+        }
+    }
+}
+
+static BOOL PollXInput(DualSenseInputState* outState) {
+    EnsureXInputLoaded();
+    if (!g_pfnXInputGetState) return FALSE;
+
+    XINPUT_STATE_S xi;
+    memset(&xi, 0, sizeof(xi));
+    for (DWORD i = 0; i < 4; i++) {
+        if (g_pfnXInputGetState(i, &xi) == 0) {
+            outState->connected = TRUE;
+            outState->lx = (short)(xi.Gamepad.sThumbLX / 256);
+            outState->ly = (short)(-xi.Gamepad.sThumbLY / 256);
+            outState->rx = (short)(xi.Gamepad.sThumbRX / 256);
+            outState->ry = (short)(-xi.Gamepad.sThumbRY / 256);
+            outState->l2 = xi.Gamepad.bLeftTrigger;
+            outState->r2 = xi.Gamepad.bRightTrigger;
+            outState->btnCross    = (xi.Gamepad.wButtons & 0x1000) != 0; // A
+            outState->btnCircle   = (xi.Gamepad.wButtons & 0x2000) != 0; // B
+            outState->btnSquare   = (xi.Gamepad.wButtons & 0x4000) != 0; // X
+            outState->btnTriangle = (xi.Gamepad.wButtons & 0x8000) != 0; // Y
+            outState->btnL1       = (xi.Gamepad.wButtons & 0x0100) != 0; // LB
+            outState->btnR1       = (xi.Gamepad.wButtons & 0x0200) != 0; // RB
+            outState->btnShare    = (xi.Gamepad.wButtons & 0x0020) != 0; // Back
+            outState->btnStart    = (xi.Gamepad.wButtons & 0x0010) != 0; // Start
+            outState->btnL3       = (xi.Gamepad.wButtons & 0x0040) != 0; // LS
+            outState->btnR3       = (xi.Gamepad.wButtons & 0x0080) != 0; // RS
+            outState->btnSelect   = outState->btnShare;
+            outState->dpadUp      = (xi.Gamepad.wButtons & 0x0001) != 0;
+            outState->dpadDown    = (xi.Gamepad.wButtons & 0x0002) != 0;
+            outState->dpadLeft    = (xi.Gamepad.wButtons & 0x0004) != 0;
+            outState->dpadRight   = (xi.Gamepad.wButtons & 0x0008) != 0;
+            return TRUE;
+        }
+    }
+    return FALSE;
+}
+
+static BOOL PollDirectInput(DualSenseInputState* outState) {
+    JOYINFOEX jie;
+    memset(&jie, 0, sizeof(jie));
+    jie.dwSize = sizeof(jie);
+    jie.dwFlags = JOY_RETURNALL;
+
+    for (UINT id = 0; id < 4; id++) {
+        if (joyGetPosEx(id, &jie) == JOYERR_NOERROR) {
+            short lx = (short)(((int)jie.dwXpos - 32768) / 256);
+            short ly = (short)(((int)jie.dwYpos - 32768) / 256);
+            short rx = (short)(((int)jie.dwZpos - 32768) / 256);
+            short ry = (short)(((int)jie.dwRpos - 32768) / 256);
+
+            // Filter phantom zeroed devices
+            if (jie.dwButtons == 0 && abs(lx) < 2 && abs(ly) < 2 && abs(rx) < 2 && abs(ry) < 2 && jie.dwPOV == 0xFFFF) {
+                continue;
+            }
+
+            outState->connected = TRUE;
+            outState->lx = lx;
+            outState->ly = ly;
+            outState->rx = rx;
+            outState->ry = ry;
+            outState->l2 = (BYTE)(jie.dwUpos / 257);
+            outState->r2 = (BYTE)(jie.dwVpos / 257);
+            outState->btnCross    = (jie.dwButtons & (1 << 0)) != 0;
+            outState->btnCircle   = (jie.dwButtons & (1 << 1)) != 0;
+            outState->btnSquare   = (jie.dwButtons & (1 << 2)) != 0;
+            outState->btnTriangle = (jie.dwButtons & (1 << 3)) != 0;
+            outState->btnL1       = (jie.dwButtons & (1 << 4)) != 0;
+            outState->btnR1       = (jie.dwButtons & (1 << 5)) != 0;
+            outState->btnShare    = (jie.dwButtons & (1 << 8)) != 0;
+            outState->btnStart    = (jie.dwButtons & (1 << 9)) != 0;
+            outState->btnL3       = (jie.dwButtons & (1 << 10)) != 0;
+            outState->btnR3       = (jie.dwButtons & (1 << 11)) != 0;
+            outState->btnSelect   = outState->btnShare;
+            if (jie.dwPOV != 0xFFFF) {
+                outState->dpadUp    = (jie.dwPOV == 0    || jie.dwPOV == 4500  || jie.dwPOV == 31500);
+                outState->dpadRight = (jie.dwPOV == 4500 || jie.dwPOV == 9000  || jie.dwPOV == 13500);
+                outState->dpadDown  = (jie.dwPOV == 13500|| jie.dwPOV == 18000 || jie.dwPOV == 22500);
+                outState->dpadLeft  = (jie.dwPOV == 22500|| jie.dwPOV == 27000 || jie.dwPOV == 31500);
+            }
+            return TRUE;
+        }
+    }
+    return FALSE;
 }
 
 // ============================================================================
@@ -439,77 +590,41 @@ static DWORD g_lastInputLogTime = 0;
 static void ProcessCustomController(CPad* pad) {
     if (!pad) return;
 
-    // *** INPUT STRATEGY ***
-    // Primary: joyGetPosEx (WinMM) - proven reliable for DualSense on Windows BT.
-    //          The DualSense registers as a standard joystick - axes + main buttons work.
-    // Overlay: g_dsInput (HID thread) - provides EXTRA buttons only (Share/Options/PS/Touch)
-    //          that joyGetPosEx doesn't expose. HID thread also handles ALL output (rumble/triggers).
     DualSenseInputState gp = { 0 };
 
-    // Step 1: Read axes + main buttons via joyGetPosEx (the proven path)
-    JOYINFOEX jie;
-    memset(&jie, 0, sizeof(jie));
-    jie.dwSize = sizeof(jie);
-    jie.dwFlags = JOY_RETURNALL;
-    if (joyGetPosEx(JOYSTICKID1, &jie) == JOYERR_NOERROR) {
-        gp.connected   = TRUE;
-        gp.lx          = (short)(((int)jie.dwXpos - 32768) / 256);
-        gp.ly          = (short)(((int)jie.dwYpos - 32768) / 256);
-        gp.rx          = (short)(((int)jie.dwZpos - 32768) / 256);
-        gp.ry          = (short)(((int)jie.dwRpos - 32768) / 256);
-        // L2/R2 analog from U/V axes
-        gp.l2          = (BYTE)(jie.dwUpos / 257);
-        gp.r2          = (BYTE)(jie.dwVpos / 257);
-        // Main face buttons
-        gp.btnCross    = (jie.dwButtons & (1 << 0)) != 0;
-        gp.btnCircle   = (jie.dwButtons & (1 << 1)) != 0;
-        gp.btnSquare   = (jie.dwButtons & (1 << 2)) != 0;
-        gp.btnTriangle = (jie.dwButtons & (1 << 3)) != 0;
-        gp.btnL1       = (jie.dwButtons & (1 << 4)) != 0;
-        gp.btnR1       = (jie.dwButtons & (1 << 5)) != 0;
-        gp.btnL2       = (jie.dwButtons & (1 << 6)) != 0;  // digital L2
-        gp.btnR2       = (jie.dwButtons & (1 << 7)) != 0;  // digital R2 (unused)
-        gp.btnShare    = (jie.dwButtons & (1 << 8)) != 0;
-        gp.btnStart    = (jie.dwButtons & (1 << 9)) != 0;
-        gp.btnL3       = (jie.dwButtons & (1 << 10)) != 0;
-        gp.btnR3       = (jie.dwButtons & (1 << 11)) != 0;
-        gp.btnPS       = (jie.dwButtons & (1 << 12)) != 0;
-        gp.btnTouch    = (jie.dwButtons & (1 << 13)) != 0;
-        gp.btnSelect   = gp.btnShare || gp.btnTouch;
-        // D-Pad from POV hat
-        if (jie.dwPOV != 0xFFFF) {
-            gp.dpadUp    = (jie.dwPOV == 0    || jie.dwPOV == 4500  || jie.dwPOV == 31500);
-            gp.dpadRight = (jie.dwPOV == 4500 || jie.dwPOV == 9000  || jie.dwPOV == 13500);
-            gp.dpadDown  = (jie.dwPOV == 13500|| jie.dwPOV == 18000 || jie.dwPOV == 22500);
-            gp.dpadLeft  = (jie.dwPOV == 22500|| jie.dwPOV == 27000 || jie.dwPOV == 31500);
-        }
-    }
-
-    // Step 2: Overlay extra HID-only buttons (Share/Options/PS) if HID thread is connected
-    // These buttons are not exposed by joyGetPosEx on all systems
+    // Multi-tier Universal Detection:
+    // 1. Native Sony HID (DualSense PS5, DualShock 4)
     if (g_dsInput.connected) {
-        if (g_dsInput.btnShare) gp.btnShare  = TRUE;
-        if (g_dsInput.btnStart) gp.btnStart  = TRUE;
-        if (g_dsInput.btnPS)    gp.btnPS     = TRUE;
-        if (g_dsInput.btnTouch) gp.btnTouch  = TRUE;
-        gp.btnSelect = gp.btnShare || gp.btnTouch;
-        // Use analog L2/R2 from HID (more accurate than joyGetPosEx axes)
-        if (g_dsInput.l2 > 0 || g_dsInput.r2 > 0) {
-            gp.l2 = g_dsInput.l2;
-            gp.r2 = g_dsInput.r2;
-        }
+        gp = g_dsInput;
+    }
+    // 2. XInput (Xbox, DS4Windows, Steam Input, DualSenseX)
+    else if (PollXInput(&gp)) {
+        // Active via XInput
+    }
+    // 3. DirectInput (Generic USB gamepads)
+    else if (PollDirectInput(&gp)) {
+        // Active via DirectInput
+    }
+    else {
+        return; // No controller connected
     }
 
-    if (!gp.connected) {
-        return;
+    DWORD now = GetTickCount();
+
+    // Debug: log raw HID data every 5 seconds to confirm data is flowing
+    static DWORD s_lastDbgLog = 0;
+    if (now - s_lastDbgLog > 5000) {
+        s_lastDbgLog = now;
+        LogMsg("[DBG] HID raw: lx=%d ly=%d rx=%d ry=%d l2=%d r2=%d cross=%d sq=%d tri=%d cir=%d l1=%d r1=%d start=%d share=%d\n",
+               gp.lx, gp.ly, gp.rx, gp.ry, gp.l2, gp.r2,
+               gp.btnCross, gp.btnSquare, gp.btnTriangle, gp.btnCircle,
+               gp.btnL1, gp.btnR1, gp.btnStart, gp.btnShare);
     }
 
     gp.lx = ApplyDeadzoneVal(gp.lx, g_cfg.deadzoneLeft);
     gp.ly = ApplyDeadzoneVal(gp.ly, g_cfg.deadzoneLeft);
     gp.rx = ApplyDeadzoneVal(gp.rx, g_cfg.deadzoneRight);
     gp.ry = ApplyDeadzoneVal(gp.ry, g_cfg.deadzoneRight);
-
-    DWORD now = GetTickCount();
 
     // ========================================================================
     // GLOBAL BUTTON EDGES: START (OPTIONS) & SHARE / TOUCHPAD (MAP)
@@ -674,20 +789,13 @@ static void ProcessCustomController(CPad* pad) {
     void* pVeh = FUNC_FindPlayerVehicle(-1, FALSE);
     BOOL isVehicle = (pVeh != NULL);
 
-    // ANALOG STICK MOVEMENT (Left Stick ONLY)
-    // CRITICAL: D-Pad NEVER moves CJ!
-    if (!isVehicle) {
-        pad->NewState.DPadUp    = 0;
-        pad->NewState.DPadDown  = 0;
-        pad->NewState.DPadLeft  = 0;
-        pad->NewState.DPadRight = 0;
+    // Clear entire NewState so CPad::Update's leftover data doesn't bleed through
+    memset(&pad->NewState, 0, sizeof(CControllerState));
 
-        if (gp.lx != 0) pad->NewState.LeftStickX = gp.lx;
-        if (gp.ly != 0) pad->NewState.LeftStickY = gp.ly;
-    } else {
-        if (gp.lx != 0) pad->NewState.LeftStickX = gp.lx;
-        if (gp.ly != 0) pad->NewState.LeftStickY = gp.ly;
-    }
+    // ANALOG STICK MOVEMENT (Left Stick ONLY)
+    // CRITICAL: D-Pad NEVER moves CJ on foot!
+    pad->NewState.LeftStickX = gp.lx;
+    pad->NewState.LeftStickY = gp.ly;
 
     // ANALOG CAMERA LOOK (Right Stick -> Mouse Deltas)
     if (gp.rx != 0 || gp.ry != 0) {
@@ -738,19 +846,6 @@ static void ProcessCustomController(CPad* pad) {
             pad->NewState.RightShoulder2 = 255; // Ciclo arma seguinte
         }
 
-        // D-PAD AÇÕES A PÉ (NÃO ANDA E NÃO TROCA ARMA):
-        if (gp.dpadUp) {
-            pad->NewState.LeftShoulder1 = 255;  // Atender telefone / stats
-        }
-        if (gp.dpadDown) {
-            pad->NewState.ShockButtonR = 255;   // Cancelar / parar gangue
-        }
-        if (gp.dpadLeft) {
-            pad->NewState.m_bChatIndicated = 1; // Resposta Não
-        }
-        if (gp.dpadRight) {
-            pad->NewState.m_bChatIndicated = 2; // Resposta Sim / Recrutar
-        }
 
         // ANALÓGICOS PRESSIONADOS
         if (gp.btnL3) pad->NewState.ShockButtonL = 255; // Agachar (Duck)
@@ -784,17 +879,7 @@ static void ProcessCustomController(CPad* pad) {
         if (gp.btnR3) {
             pad->NewState.ShockButtonR = 255;   // Missão veículo
         }
-
-        // D-PAD EM VEÍCULO: MUDAR RÁDIO!
-        if (gp.dpadLeft) {
-            pad->NewState.DPadDown = 255;       // Rádio anterior
-        }
-        if (gp.dpadRight) {
-            pad->NewState.DPadUp = 255;         // Próxima rádio
-        }
-        if (gp.dpadUp || gp.dpadDown) {
-            pad->NewState.LeftShoulder1 = 255;  // Pular viagem táxi
-        }
+        // D-PAD: SOMENTE NO MENU — nenhuma ação em veículo
     }
 
     // ========================================================================

@@ -1,387 +1,457 @@
 import tkinter as tk
 from tkinter import ttk, messagebox
-import ctypes
-from ctypes import wintypes
 import time
-import json
-import os
 import threading
+try:
+    import hid
+except ImportError:
+    hid = None
 
-kernel32 = ctypes.windll.kernel32
-winmm = ctypes.windll.winmm
+# ─────────────────────────────────────────────────────────────────────────────
+# DualSense BT CRC32
+# ─────────────────────────────────────────────────────────────────────────────
+_CRC_TABLE = []
+for _i in range(256):
+    _c = _i
+    for _ in range(8):
+        _c = (_c >> 1) ^ 0xEDB88320 if (_c & 1) else (_c >> 1)
+    _CRC_TABLE.append(_c)
 
-# DualSense BT CRC32 Table
-g_crc_table = []
-for i in range(256):
-    c = i
-    for j in range(8):
-        c = (c >> 1) ^ 0xEDB88320 if (c & 1) else (c >> 1)
-    g_crc_table.append(c)
-
-def dualsense_crc32(buf):
+def _crc32(data: bytes) -> int:
     c = 0xFFFFFFFF
-    for b in buf:
-        c = g_crc_table[(c ^ b) & 0xFF] ^ (c >> 8)
+    for b in data:
+        c = _CRC_TABLE[(c ^ b) & 0xFF] ^ (c >> 8)
     return (~c) & 0xFFFFFFFF
 
-DUALSENSE_PATH = '\\\\?\\hid#{00001124-0000-1000-8000-00805f9b34fb}_vid&0002054c_pid&0ce6#8&2a285c49&1&0000#{4d1e55b2-f16f-11cf-88cb-001111000030}'
+# ─────────────────────────────────────────────────────────────────────────────
+# DualSense Hardware Driver
+# ─────────────────────────────────────────────────────────────────────────────
+SONY_VID = 0x054C
+SONY_PIDS = {
+    0x0CE6: "DualSense PS5 (Wireless/BT)",
+    0x0DF2: "DualSense Edge PS5",
+    0x05C4: "DualShock 4 v1",
+    0x09CC: "DualShock 4 v2"
+}
 
-class GamepadTesterApp:
-    def __init__(self, root):
-        self.root = root
-        self.root.title("Antigravity - Universal Gamepad & DualSense Tester")
-        self.root.geometry("820x680")
-        self.root.configure(bg="#121214")
-        self.root.resizable(False, False)
+class DualSenseDriver:
+    def __init__(self):
+        self.dev = None
+        self.is_bt = False
+        self.pid = 0
+        self.name = "Nenhum controle detectado"
+        self.transport = "—"
 
-        self.ds_handle = None
-        self.running = True
-
-        self.latest_input = {
-            "lx": 0, "ly": 0, "rx": 0, "ry": 0,
-            "l2": 0, "r2": 0,
-            "square": False, "cross": False, "circle": False, "triangle": False,
-            "l1": False, "r1": False, "l3": False, "r3": False,
-            "start": False, "select": False,
-            "dpad_up": False, "dpad_down": False, "dpad_left": False, "dpad_right": False
-        }
-
-        self.stats = {
-            "start_time": time.strftime("%Y-%m-%d %H:%M:%S"),
-            "controller_detected": False,
-            "transport": "None",
-            "buttons_pressed": set(),
-            "max_lx": 0, "min_lx": 0,
-            "max_ly": 0, "min_ly": 0,
-            "max_rx": 0, "min_rx": 0,
-            "max_ry": 0, "min_ry": 0,
-            "max_l2": 0, "max_r2": 0,
-            "dpad_directions": set(),
-            "adaptive_trigger_tested": False,
-            "vibration_tested": False,
-            "total_frames_polled": 0
-        }
-
-        self.init_hardware()
-        self.create_ui()
-
-        # Start background input reader thread
-        self.read_thread = threading.Thread(target=self.hid_read_worker, daemon=True)
-        self.read_thread.start()
-
-        self.root.protocol("WM_DELETE_WINDOW", self.on_close)
-        self.update_ui_loop()
-
-    def init_hardware(self):
+    def connect(self) -> bool:
+        if not hid:
+            return False
         try:
-            # Open with GENERIC_READ | GENERIC_WRITE (0xC0000000)
-            h = kernel32.CreateFileA(
-                DUALSENSE_PATH.encode('utf-8'),
-                0xC0000000,
-                1 | 2,      # SHARE READ | WRITE
-                None,
-                3,          # OPEN_EXISTING
-                0,
-                None
-            )
-            if h != -1 and h != 0:
-                self.ds_handle = h
-                self.stats["controller_detected"] = True
-                self.stats["transport"] = "Bluetooth HID Direct"
-        except Exception as e:
-            self.ds_handle = None
+            devs = hid.enumerate(SONY_VID)
+            for d in devs:
+                pid = d.get('product_id', 0)
+                if pid in SONY_PIDS:
+                    try:
+                        dev = hid.device()
+                        dev.open_path(d['path'])
+                        dev.set_nonblocking(True)
+                        self.dev = dev
+                        self.pid = pid
+                        self.name = SONY_PIDS.get(pid, "Sony Controller")
+                        # 0x0CE6 over BT has report 0x31 (78 bytes)
+                        self.is_bt = (pid == 0x0CE6 and d.get('interface_number', -1) == -1)
+                        self.transport = "Bluetooth" if self.is_bt else "USB / Direct"
+                        return True
+                    except Exception:
+                        pass
+        except Exception:
+            pass
+        return False
 
-    def send_dualsense_report(self, left_motor=0, right_motor=0, lt_mode=2, rt_mode=2, r2_start=20, r2_force=255, l2_start=25, l2_force=240):
-        if not self.ds_handle:
-            self.init_hardware()
-        if not self.ds_handle:
+    def read(self) -> bytes | None:
+        if not self.dev:
+            return None
+        try:
+            data = self.dev.read(100)
+            return bytes(data) if data else None
+        except Exception:
+            return None
+
+    def send_output(self, *, left_motor=0, right_motor=0,
+                    r2_mode=2, r2_start=20, r2_force=255,
+                    l2_mode=2, l2_start=25, l2_force=240,
+                    r=0, g=120, b=255):
+        if not self.dev:
+            return False
+        try:
+            if self.is_bt:
+                report = bytearray(78)
+                report[0]  = 0x31
+                report[1]  = 0x02
+                report[2]  = 0xFF
+                report[3]  = 0x57
+                report[4]  = right_motor
+                report[5]  = left_motor
+                report[11] = r2_mode
+                report[12] = 0x02
+                report[13] = r2_start
+                report[14] = r2_force
+                report[22] = l2_mode
+                report[23] = 0x02
+                report[24] = l2_start
+                report[25] = l2_force
+                report[40] = 0x02
+                report[44] = 0x00
+                report[45] = 0x04
+                report[46] = r
+                report[47] = g
+                report[48] = b
+                crc = _crc32(b'\xa2' + bytes(report[:74]))
+                report[74] = crc & 0xFF
+                report[75] = (crc >> 8) & 0xFF
+                report[76] = (crc >> 16) & 0xFF
+                report[77] = (crc >> 24) & 0xFF
+                self.dev.write(bytes(report))
+            else:
+                report = bytearray(48)
+                report[0]  = 0x02
+                report[1]  = 0xFF
+                report[2]  = 0x57
+                report[3]  = right_motor
+                report[4]  = left_motor
+                report[10] = r2_mode
+                report[11] = 0x02
+                report[12] = r2_start
+                report[13] = r2_force
+                report[21] = l2_mode
+                report[22] = 0x02
+                report[23] = l2_start
+                report[24] = l2_force
+                report[39] = 0x02
+                report[43] = 0x00
+                report[44] = 0x04
+                report[45] = r
+                report[46] = g
+                report[47] = b
+                self.dev.write(bytes([0x02]) + bytes(report))
+            return True
+        except Exception:
             return False
 
-        report = bytearray(78)
-        report[0] = 0x31
-        report[1] = 0x02
-        report[2] = 0x01 | 0x02 | 0x04 | 0x08
-        report[4] = right_motor
-        report[5] = left_motor
+    def parse(self, raw: bytes) -> dict:
+        if not raw or len(raw) < 10:
+            return {}
+        bt = (raw[0] == 0x31)
+        base = 2 if bt else 1
+        def byte(i):
+            idx = base + i
+            return raw[idx] if idx < len(raw) else 0
 
-        # R2 Trigger (Curto e Forte)
-        report[11] = rt_mode
-        report[12] = r2_start
-        report[13] = r2_force
+        lx = byte(0) - 128
+        ly = byte(1) - 128
+        rx = byte(2) - 128
+        ry = byte(3) - 128
+        l2 = byte(4)
+        r2 = byte(5)
 
-        # L2 Trigger
-        report[22] = lt_mode
-        report[23] = l2_start
-        report[24] = l2_force
+        b0 = byte(7)
+        b1 = byte(8)
+        b2 = byte(9)
 
-        crc = dualsense_crc32(b'\xa2' + bytes(report[:74]))
-        report[74:78] = crc.to_bytes(4, 'little')
+        dpad = b0 & 0x0F
+        square   = bool(b0 & 0x10)
+        cross    = bool(b0 & 0x20)
+        circle   = bool(b0 & 0x40)
+        triangle = bool(b0 & 0x80)
 
-        written = wintypes.DWORD()
-        ok = kernel32.WriteFile(self.ds_handle, (ctypes.c_char * 78).from_buffer(report), 78, ctypes.byref(written), None)
-        return bool(ok)
+        l1      = bool(b1 & 0x01)
+        r1      = bool(b1 & 0x02)
+        l2d     = bool(b1 & 0x04)
+        r2d     = bool(b1 & 0x08)
+        share   = bool(b1 & 0x10)
+        options = bool(b1 & 0x20)
+        l3      = bool(b1 & 0x40)
+        r3      = bool(b1 & 0x80)
 
-    def hid_read_worker(self):
-        buf = (ctypes.c_char * 78)()
-        read_bytes = wintypes.DWORD()
+        ps_btn  = bool(b2 & 0x01)
+        touch   = bool(b2 & 0x02)
+        mute    = bool(b2 & 0x04)
 
+        # Touchpad XY
+        tp_base = base + 31
+        tp0 = raw[tp_base] if tp_base < len(raw) else 0
+        tp1 = raw[tp_base+1] if tp_base+1 < len(raw) else 0
+        tp2 = raw[tp_base+2] if tp_base+2 < len(raw) else 0
+        tp_x = ((tp1 & 0x0F) << 8) | tp0
+        tp_y = (tp2 << 4) | ((tp1 & 0xF0) >> 4)
+
+        return {
+            "lx": lx, "ly": ly, "rx": rx, "ry": ry,
+            "l2": l2, "r2": r2,
+            "square": square, "cross": cross, "circle": circle, "triangle": triangle,
+            "l1": l1, "r1": r1, "l2d": l2d, "r2d": r2d,
+            "l3": l3, "r3": r3,
+            "share": share, "options": options,
+            "ps": ps_btn, "touch": touch, "mute": mute,
+            "dpad_up":    dpad in (0, 1, 7),
+            "dpad_right": dpad in (1, 2, 3),
+            "dpad_down":  dpad in (3, 4, 5),
+            "dpad_left":  dpad in (5, 6, 7),
+            "tp_x": tp_x, "tp_y": tp_y,
+            "bt": bt
+        }
+
+    def close(self):
+        if self.dev:
+            try:
+                self.dev.close()
+            except Exception:
+                pass
+            self.dev = None
+
+# ─────────────────────────────────────────────────────────────────────────────
+# UI Application
+# ─────────────────────────────────────────────────────────────────────────────
+C_BG     = "#0f0f13"
+C_PANEL  = "#181820"
+C_BORDER = "#272736"
+C_TEXT   = "#e2e2f0"
+C_DIM    = "#64748b"
+C_BLUE   = "#38bdf8"
+C_GREEN  = "#22c55e"
+C_RED    = "#f43f5e"
+C_YELLOW = "#facc15"
+C_PURPLE = "#c084fc"
+
+class GamepadTesterApp:
+    def __init__(self, root: tk.Tk):
+        self.root = root
+        self.root.title("Antigravity — Testador Profissional de Controle (DualSense / PS4)")
+        self.root.configure(bg=C_BG)
+        self.root.geometry("880x640")
+        self.root.resizable(False, False)
+
+        self.driver = DualSenseDriver()
+        self.running = True
+        self.inp = {}
+
+        self._build_ui()
+        self._connect()
+
+        self._thread = threading.Thread(target=self._worker, daemon=True)
+        self._thread.start()
+
+        self.root.protocol("WM_DELETE_WINDOW", self._on_close)
+        self._update_loop()
+
+    def _connect(self):
+        ok = self.driver.connect()
+        if ok:
+            self.lbl_status.config(
+                text=f"🟢 CONECTADO: {self.driver.name} [{self.driver.transport}]",
+                fg=C_GREEN)
+            self.driver.send_output()
+        else:
+            self.lbl_status.config(text="🔴 Nenhum controle detectado — Conecte via Bluetooth ou Cabo USB", fg=C_RED)
+
+    def _worker(self):
         while self.running:
-            if not self.ds_handle:
-                self.init_hardware()
-                time.sleep(0.5)
+            if not self.driver.dev:
+                time.sleep(1.0)
+                self._connect()
                 continue
-
-            ok = kernel32.ReadFile(self.ds_handle, buf, 78, ctypes.byref(read_bytes), None)
-            if ok and read_bytes.value >= 11:
-                raw = bytes(buf)[:read_bytes.value]
-
-                # DualSense Bluetooth Report 0x31:
-                # raw[0] = 0x31
-                # raw[1] = seq
-                # raw[2] = LX (0..255, 128 is center)
-                # raw[3] = LY
-                # raw[4] = RX
-                # raw[5] = RY
-                # raw[6] = L2 Analog (0..255)
-                # raw[7] = R2 Analog (0..255)
-                # raw[8] = DPad (low nibble) + Face buttons (high nibble)
-                # raw[9] = Shoulders + Menu buttons
-                # raw[10] = Touchpad click + PS button
-
-                lx = int(raw[2]) - 128
-                ly = int(raw[3]) - 128
-                rx = int(raw[4]) - 128
-                ry = int(raw[5]) - 128
-                l2 = int(raw[6])
-                r2 = int(raw[7])
-
-                b8 = raw[8]
-                dpad_val = b8 & 0x0F
-                sq = bool(b8 & 0x10)
-                cr = bool(b8 & 0x20)
-                ci = bool(b8 & 0x40)
-                tr = bool(b8 & 0x80)
-
-                b9 = raw[9]
-                l1 = bool(b9 & 0x01)
-                r1 = bool(b9 & 0x02)
-                share = bool(b9 & 0x10)
-                options = bool(b9 & 0x20)
-                l3 = bool(b9 & 0x40)
-                r3 = bool(b9 & 0x80)
-
-                b10 = raw[10] if len(raw) > 10 else 0
-                touchpad = bool(b10 & 0x02)
-
-                # D-Pad interpretation
-                # 0=N, 1=NE, 2=E, 3=SE, 4=S, 5=SW, 6=W, 7=NW, 8=None
-                du = dpad_val in (0, 1, 7)
-                dr = dpad_val in (1, 2, 3)
-                dd = dpad_val in (3, 4, 5)
-                dl = dpad_val in (5, 6, 7)
-
-                self.latest_input = {
-                    "lx": lx, "ly": ly, "rx": rx, "ry": ry,
-                    "l2": l2, "r2": r2,
-                    "square": sq, "cross": cr, "circle": ci, "triangle": tr,
-                    "l1": l1, "r1": r1, "l3": l3, "r3": r3,
-                    "start": options, "select": (share or touchpad),
-                    "dpad_up": du, "dpad_down": dd, "dpad_left": dl, "dpad_right": dr
-                }
+            raw = self.driver.read()
+            if raw:
+                self.inp = self.driver.parse(raw)
             else:
                 time.sleep(0.01)
 
-    def create_ui(self):
-        header = tk.Frame(self.root, bg="#1a1a1e", height=60)
-        header.pack(fill=tk.X)
+    def _build_ui(self):
+        hdr = tk.Frame(self.root, bg="#13131c", pady=8)
+        hdr.pack(fill=tk.X)
+        tk.Label(hdr, text="🎮 TESTADOR DE CONTROLE — SONY DUALSENSE PS5 / PS4",
+                 font=("Segoe UI", 12, "bold"), fg=C_BLUE, bg="#13131c").pack()
+        self.lbl_status = tk.Label(hdr, text="Detectando hardware...",
+                                   font=("Segoe UI", 9, "bold"), fg=C_DIM, bg="#13131c")
+        self.lbl_status.pack()
 
-        title = tk.Label(header, text="🎮 TESTADOR DE HARDWARE: SONY DUALSENSE PS5", font=("Segoe UI", 13, "bold"), fg="#38bdf8", bg="#1a1a1e")
-        title.pack(pady=(10, 2))
+        body = tk.Frame(self.root, bg=C_BG)
+        body.pack(fill=tk.BOTH, expand=True, padx=12, pady=8)
+        body.columnconfigure(0, weight=1)
+        body.columnconfigure(1, weight=1)
+        body.rowconfigure(0, weight=1)
 
-        self.lbl_status = tk.Label(header, text="CONECTADO: Sony DualSense PS5 (Bluetooth Direct HID)", font=("Segoe UI", 9, "bold"), fg="#4ade80", bg="#1a1a1e")
-        self.lbl_status.pack(pady=(0, 8))
+        # Left Column: Analogs, Triggers, Test Buttons
+        left = tk.LabelFrame(body, text=" ANALÓGICOS & GATILHOS ADAPTATIVOS ",
+                             font=("Segoe UI", 9, "bold"), fg=C_DIM, bg=C_PANEL,
+                             bd=1, relief=tk.SOLID, labelanchor="n")
+        left.grid(row=0, column=0, sticky="nsew", padx=6, pady=4)
 
-        main = tk.Frame(self.root, bg="#121214")
-        main.pack(fill=tk.BOTH, expand=True, padx=20, pady=10)
+        cv = tk.Canvas(left, width=380, height=180, bg="#09090f", highlightthickness=0)
+        cv.pack(pady=8)
+        self._cv = cv
 
-        # Left Column: Sticks & Triggers
-        left_col = tk.Frame(main, bg="#18181b", bd=1, relief=tk.SOLID)
-        left_col.pack(side=tk.LEFT, fill=tk.BOTH, expand=True, padx=(0, 10))
+        # Left stick
+        cv.create_oval(30, 20, 170, 160, outline=C_BORDER, width=2)
+        cv.create_line(100, 20, 100, 160, fill=C_BORDER)
+        cv.create_line(30, 90, 170, 90, fill=C_BORDER)
+        self._sl = cv.create_oval(90, 80, 110, 100, fill=C_BLUE, outline="#60a5fa", width=2)
+        cv.create_text(100, 170, text="ANALÓGICO ESQ (L)", fill=C_DIM, font=("Segoe UI", 8, "bold"))
+        self._lbl_ls = cv.create_text(100, 15, text="0, 0", fill=C_DIM, font=("Consolas", 8))
 
-        lbl_analog = tk.Label(left_col, text="ANALÓGICOS & GATILHOS L2 / R2", font=("Segoe UI", 10, "bold"), fg="#a1a1aa", bg="#18181b")
-        lbl_analog.pack(pady=8)
+        # Right stick
+        cv.create_oval(210, 20, 350, 160, outline=C_BORDER, width=2)
+        cv.create_line(280, 20, 280, 160, fill=C_BORDER)
+        cv.create_line(210, 90, 350, 90, fill=C_BORDER)
+        self._sr = cv.create_oval(270, 80, 290, 100, fill=C_PURPLE, outline="#c084fc", width=2)
+        cv.create_text(280, 170, text="ANALÓGICO DIR (R)", fill=C_DIM, font=("Segoe UI", 8, "bold"))
+        self._lbl_rs = cv.create_text(280, 15, text="0, 0", fill=C_DIM, font=("Consolas", 8))
 
-        self.canvas_sticks = tk.Canvas(left_col, width=360, height=180, bg="#09090b", highlightthickness=0)
-        self.canvas_sticks.pack(pady=5)
+        # Triggers
+        trig = tk.Frame(left, bg=C_PANEL)
+        trig.pack(fill=tk.X, padx=16, pady=6)
 
-        self.canvas_sticks.create_oval(30, 20, 170, 160, outline="#27272a", width=2)
-        self.canvas_sticks.create_line(100, 20, 100, 160, fill="#27272a")
-        self.canvas_sticks.create_line(30, 90, 170, 90, fill="#27272a")
-        self.stick_l = self.canvas_sticks.create_oval(90, 80, 110, 100, fill="#38bdf8", outline="#60a5fa")
-        self.canvas_sticks.create_text(100, 170, text="ANALÓGICO ESQUERDO (L)", fill="#71717a", font=("Segoe UI", 8, "bold"))
+        tk.Label(trig, text="L2 (Mira / Freio):", font=("Segoe UI", 8, "bold"),
+                 fg=C_TEXT, bg=C_PANEL, width=18, anchor="w").grid(row=0, column=0)
+        self._bar_l2 = ttk.Progressbar(trig, length=180, maximum=255)
+        self._bar_l2.grid(row=0, column=1, padx=6, pady=3)
+        self._lbl_l2 = tk.Label(trig, text="0", font=("Consolas", 9, "bold"), fg=C_BLUE, bg=C_PANEL, width=4)
+        self._lbl_l2.grid(row=0, column=2)
 
-        self.canvas_sticks.create_oval(190, 20, 330, 160, outline="#27272a", width=2)
-        self.canvas_sticks.create_line(260, 20, 260, 160, fill="#27272a")
-        self.canvas_sticks.create_line(190, 90, 330, 90, fill="#27272a")
-        self.stick_r = self.canvas_sticks.create_oval(250, 80, 270, 100, fill="#a855f7", outline="#c084fc")
-        self.canvas_sticks.create_text(260, 170, text="ANALÓGICO DIREITO (R)", fill="#71717a", font=("Segoe UI", 8, "bold"))
+        tk.Label(trig, text="R2 (Tiro / Acelerar):", font=("Segoe UI", 8, "bold"),
+                 fg=C_TEXT, bg=C_PANEL, width=18, anchor="w").grid(row=1, column=0)
+        self._bar_r2 = ttk.Progressbar(trig, length=180, maximum=255)
+        self._bar_r2.grid(row=1, column=1, padx=6, pady=3)
+        self._lbl_r2 = tk.Label(trig, text="0", font=("Consolas", 9, "bold"), fg=C_RED, bg=C_PANEL, width=4)
+        self._lbl_r2.grid(row=1, column=2)
 
-        trig_frame = tk.Frame(left_col, bg="#18181b")
-        trig_frame.pack(fill=tk.X, padx=20, pady=10)
+        # Action test buttons
+        act = tk.Frame(left, bg=C_PANEL)
+        act.pack(fill=tk.X, padx=16, pady=8)
+        tk.Button(act, text="💥 Testar Gatilho Curto e Forte (R2 Parede Mecânica)",
+                  font=("Segoe UI", 9, "bold"), bg="#1d4ed8", fg="white", relief=tk.FLAT, pady=5,
+                  command=self._test_triggers).pack(fill=tk.X, pady=3)
+        tk.Button(act, text="📳 Testar Vibração Háptica (Motores DualSense)",
+                  font=("Segoe UI", 9, "bold"), bg="#d97706", fg="white", relief=tk.FLAT, pady=5,
+                  command=self._test_vibration).pack(fill=tk.X, pady=3)
+        tk.Button(act, text="🔄 Restaurar Gatilhos Livres",
+                  font=("Segoe UI", 8), bg="#334155", fg="white", relief=tk.FLAT, pady=4,
+                  command=self._reset_triggers).pack(fill=tk.X, pady=3)
 
-        tk.Label(trig_frame, text="Gatilho L2 (Mira / Freio):", font=("Segoe UI", 9), fg="#e4e4e7", bg="#18181b").grid(row=0, column=0, sticky="w")
-        self.bar_l2 = ttk.Progressbar(trig_frame, length=200, maximum=255, value=0)
-        self.bar_l2.grid(row=0, column=1, padx=10, pady=4)
-        self.lbl_val_l2 = tk.Label(trig_frame, text="0", font=("Segoe UI", 9, "bold"), fg="#38bdf8", bg="#18181b", width=4)
-        self.lbl_val_l2.grid(row=0, column=2)
+        # Right Column: Buttons & Extras
+        right = tk.LabelFrame(body, text=" BOTÕES FÍSICOS & RECURSOS ",
+                              font=("Segoe UI", 9, "bold"), fg=C_DIM, bg=C_PANEL,
+                              bd=1, relief=tk.SOLID, labelanchor="n")
+        right.grid(row=0, column=1, sticky="nsew", padx=6, pady=4)
 
-        tk.Label(trig_frame, text="Gatilho R2 (Tiro / Acelerar):", font=("Segoe UI", 9), fg="#e4e4e7", bg="#18181b").grid(row=1, column=0, sticky="w")
-        self.bar_r2 = ttk.Progressbar(trig_frame, length=200, maximum=255, value=0)
-        self.bar_r2.grid(row=1, column=1, padx=10, pady=4)
-        self.lbl_val_r2 = tk.Label(trig_frame, text="0", font=("Segoe UI", 9, "bold"), fg="#f43f5e", bg="#18181b", width=4)
-        self.lbl_val_r2.grid(row=1, column=2)
+        grid = tk.Frame(right, bg=C_PANEL)
+        grid.pack(padx=12, pady=6)
 
-        actions_frame = tk.Frame(left_col, bg="#18181b")
-        actions_frame.pack(fill=tk.X, padx=20, pady=(5, 10))
-
-        btn_trig = tk.Button(actions_frame, text="💥 Testar Gatilhos Curto e Forte", font=("Segoe UI", 9, "bold"), bg="#2563eb", fg="white", activebackground="#1d4ed8", command=self.action_test_triggers)
-        btn_trig.pack(fill=tk.X, pady=3)
-
-        btn_vib = tk.Button(actions_frame, text="📳 Testar Vibração Háptica", font=("Segoe UI", 9, "bold"), bg="#d97706", fg="white", activebackground="#b45309", command=self.action_test_vibration)
-        btn_vib.pack(fill=tk.X, pady=3)
-
-        btn_reset = tk.Button(actions_frame, text="🔄 Restaurar Gatilhos Normais", font=("Segoe UI", 8), bg="#3f3f46", fg="white", activebackground="#27272a", command=self.action_reset_triggers)
-        btn_reset.pack(fill=tk.X, pady=3)
-
-        # Right Column: Buttons
-        right_col = tk.Frame(main, bg="#18181b", bd=1, relief=tk.SOLID)
-        right_col.pack(side=tk.RIGHT, fill=tk.BOTH, expand=True)
-
-        lbl_buttons = tk.Label(right_col, text="BOTÕES FÍSICOS (PRESSIONE NO CONTROLE)", font=("Segoe UI", 10, "bold"), fg="#a1a1aa", bg="#18181b")
-        lbl_buttons.pack(pady=8)
-
-        self.btn_widgets = {}
-        grid_frame = tk.Frame(right_col, bg="#18181b")
-        grid_frame.pack(padx=10, pady=5)
-
-        buttons_layout = [
-            [("L1", "L1 (Arma Ant)"), ("R1", "R1 (Próx Arma)")],
-            [("Square", "◻ Quadrado"), ("Triangle", "△ Triângulo")],
-            [("Cross", "╳ Cruz"), ("Circle", "⭘ Círculo")],
-            [("L3", "L3 (Agachar)"), ("R3", "R3 (Olhar Trás)")],
-            [("Select", "Share / Touch"), ("Start", "Options (Pausa)")],
-            [("DPadUp", "D-Pad Cima"), ("DPadDown", "D-Pad Baixo")],
-            [("DPadLeft", "D-Pad Esq"), ("DPadRight", "D-Pad Dir")],
+        layout = [
+            [("l1", "L1 (Arma Ant)"), ("r1", "R1 (Próx Arma)")],
+            [("l2d", "L2 Digital"), ("r2d", "R2 Digital")],
+            [("square", "◻ Quadrado"), ("triangle", "△ Triângulo")],
+            [("cross", "✕ Cruz"), ("circle", "○ Círculo")],
+            [("l3", "L3 (Agachar)"), ("r3", "R3 (Olhar Trás)")],
+            [("share", "Share / Create"), ("options", "Options (Pause)")],
+            [("ps", "🔵 Botão PS"), ("touch", "Touchpad Click")],
+            [("mute", "Mute"), ("tp_pos", "Touch: —")],
+            [("dpad_up", "D-Pad ↑"), ("dpad_down", "D-Pad ↓")],
+            [("dpad_left", "D-Pad ←"), ("dpad_right", "D-Pad →")],
         ]
 
-        for r_idx, row in enumerate(buttons_layout):
-            for c_idx, (key, label) in enumerate(row):
-                lbl = tk.Label(grid_frame, text=label, font=("Segoe UI", 8, "bold"), fg="#71717a", bg="#27272a", width=18, height=1, relief=tk.FLAT)
-                lbl.grid(row=r_idx, column=c_idx, padx=4, pady=3)
-                self.btn_widgets[key] = lbl
+        self._btn_w = {}
+        for r, row in enumerate(layout):
+            for c, (key, label) in enumerate(row):
+                lbl = tk.Label(grid, text=label, font=("Segoe UI", 8, "bold"),
+                               fg=C_DIM, bg=C_BORDER, width=18, height=1, relief=tk.FLAT, pady=3)
+                lbl.grid(row=r, column=c, padx=3, pady=2)
+                self._btn_w[key] = lbl
 
-        lbl_log = tk.Label(right_col, text="REGISTRO DE EVENTOS EM TEMPO REAL:", font=("Segoe UI", 8, "bold"), fg="#a1a1aa", bg="#18181b")
-        lbl_log.pack(anchor="w", padx=15, pady=(10, 2))
+        # Log
+        tk.Label(right, text="REGISTRO DE EVENTOS:", font=("Segoe UI", 8, "bold"),
+                 fg=C_DIM, bg=C_PANEL).pack(anchor="w", padx=12, pady=(6, 2))
+        self._log = tk.Text(right, height=6, bg="#09090f", fg=C_GREEN,
+                            font=("Consolas", 8), relief=tk.FLAT, state=tk.DISABLED)
+        self._log.pack(fill=tk.BOTH, expand=True, padx=12, pady=(0, 8))
 
-        self.txt_log = tk.Text(right_col, height=7, bg="#09090b", fg="#22c55e", font=("Consolas", 8), relief=tk.FLAT)
-        self.txt_log.pack(fill=tk.BOTH, expand=True, padx=15, pady=(0, 10))
+    def _log_msg(self, msg):
+        self._log.config(state=tk.NORMAL)
+        self._log.insert(tk.END, f"[{time.strftime('%H:%M:%S')}] {msg}\n")
+        self._log.see(tk.END)
+        self._log.config(state=tk.DISABLED)
 
-    def log_event(self, text):
-        self.txt_log.insert(tk.END, f"[{time.strftime('%H:%M:%S')}] {text}\n")
-        self.txt_log.see(tk.END)
+    def _test_triggers(self):
+        self._log_msg("Gatilho R2: Batente mecânico curto ativado!")
+        self.driver.send_output(r2_mode=2, r2_start=20, r2_force=255,
+                                l2_mode=2, l2_start=25, l2_force=240)
+        messagebox.showinfo("Gatilhos Ativados", "Gatilho R2 bloqueado como batente mecânico curto!\nPuxe o R2 agora para sentir a resistência.")
 
-    def action_test_triggers(self):
-        self.stats["adaptive_trigger_tested"] = True
-        self.log_event("Gatilhos Curto e Forte ativados (R2: stop 20, forca 255 | L2: stop 25, forca 240)")
-        ok = self.send_dualsense_report(0, 0, lt_mode=2, rt_mode=2, r2_start=20, r2_force=255, l2_start=25, l2_force=240)
-        if ok:
-            messagebox.showinfo("Gatilhos Ativados", "Gatilhos Adaptativos ativados!\nPuxe L2 e R2 agora para sentir a parede mecânica rígida!")
-        else:
-            self.log_event("Falha ao enviar comando para o controle!")
+    def _test_vibration(self):
+        self._log_msg("Pulsos de vibração háptica...")
+        def _v():
+            for _ in range(3):
+                self.driver.send_output(left_motor=220, right_motor=240)
+                time.sleep(0.18)
+                self.driver.send_output(left_motor=0, right_motor=0)
+                time.sleep(0.12)
+            self._log_msg("Vibração concluída!")
+        threading.Thread(target=_v, daemon=True).start()
 
-    def action_test_vibration(self):
-        self.stats["vibration_tested"] = True
-        self.log_event("Enviando pulsos de vibração háptica nos motores...")
-        threading.Thread(target=self._vibrate_worker, daemon=True).start()
+    def _reset_triggers(self):
+        self._log_msg("Gatilhos livres restaurados.")
+        self.driver.send_output(r2_mode=0, r2_start=0, r2_force=0,
+                                l2_mode=0, l2_start=0, l2_force=0)
 
-    def _vibrate_worker(self):
-        for _ in range(3):
-            self.send_dualsense_report(left_motor=220, right_motor=240, rt_mode=2, lt_mode=2)
-            time.sleep(0.18)
-            self.send_dualsense_report(left_motor=0, right_motor=0, rt_mode=2, lt_mode=2)
-            time.sleep(0.12)
-        self.log_event("Vibração concluída!")
+    _prev_pressed = set()
 
-    def action_reset_triggers(self):
-        self.log_event("Restaurando gatilhos livres...")
-        self.send_dualsense_report(left_motor=0, right_motor=0, lt_mode=0, rt_mode=0, r2_start=0, r2_force=0, l2_start=0, l2_force=0)
-
-    def update_ui_loop(self):
+    def _update_loop(self):
         if not self.running:
             return
+        inp = self.inp
+        if inp:
+            lx, ly = inp.get("lx", 0), inp.get("ly", 0)
+            rx, ry = inp.get("rx", 0), inp.get("ry", 0)
+            l2, r2 = inp.get("l2", 0), inp.get("r2", 0)
 
-        inp = self.latest_input
-        lx, ly = inp["lx"], inp["ly"]
-        rx, ry = inp["rx"], inp["ry"]
-        l2, r2 = inp["l2"], inp["r2"]
+            slx = 100 + int((lx / 128.0) * 55)
+            sly = 90 + int((ly / 128.0) * 55)
+            self._cv.coords(self._sl, slx - 9, sly - 9, slx + 9, sly + 9)
+            self._cv.itemconfig(self._lbl_ls, text=f"{lx:+4d}, {ly:+4d}")
 
-        # Update sticks UI
-        slx = 100 + int((lx / 128.0) * 55)
-        sly = 90 + int((ly / 128.0) * 55)
-        self.canvas_sticks.coords(self.stick_l, slx - 10, sly - 10, slx + 10, sly + 10)
+            srx = 280 + int((rx / 128.0) * 55)
+            sry = 90 + int((ry / 128.0) * 55)
+            self._cv.coords(self._sr, srx - 9, sry - 9, srx + 9, sry + 9)
+            self._cv.itemconfig(self._lbl_rs, text=f"{rx:+4d}, {ry:+4d}")
 
-        srx = 260 + int((rx / 128.0) * 55)
-        sry = 90 + int((ry / 128.0) * 55)
-        self.canvas_sticks.coords(self.stick_r, srx - 10, sry - 10, srx + 10, sry + 10)
+            self._bar_l2["value"] = l2
+            self._lbl_l2.config(text=str(l2))
+            self._bar_r2["value"] = r2
+            self._lbl_r2.config(text=str(r2))
 
-        # Update triggers UI
-        self.bar_l2["value"] = l2
-        self.lbl_val_l2.config(text=str(l2))
-        self.bar_r2["value"] = r2
-        self.lbl_val_r2.config(text=str(r2))
+            curr_pressed = set()
+            for k, w in self._btn_w.items():
+                if k == "tp_pos":
+                    if inp.get("touch"):
+                        w.config(text=f"X={inp.get('tp_x',0)} Y={inp.get('tp_y',0)}", bg=C_BLUE, fg="white")
+                    else:
+                        w.config(text="Touch: —", bg=C_BORDER, fg=C_DIM)
+                    continue
+                if inp.get(k, False):
+                    curr_pressed.add(k)
+                    w.config(bg=C_GREEN, fg="white")
+                else:
+                    w.config(bg=C_BORDER, fg=C_DIM)
 
-        # Update button badges
-        btn_states = {
-            "Square": inp["square"],
-            "Cross": inp["cross"],
-            "Circle": inp["circle"],
-            "Triangle": inp["triangle"],
-            "L1": inp["l1"],
-            "R1": inp["r1"],
-            "L3": inp["l3"],
-            "R3": inp["r3"],
-            "Start": inp["start"],
-            "Select": inp["select"],
-            "DPadUp": inp["dpad_up"],
-            "DPadDown": inp["dpad_down"],
-            "DPadLeft": inp["dpad_left"],
-            "DPadRight": inp["dpad_right"],
-        }
+            new_keys = curr_pressed - self._prev_pressed
+            for k in new_keys:
+                self._log_msg(f"Pressionado: {k.upper()}")
+            self._prev_pressed = curr_pressed
 
-        for k, is_down in btn_states.items():
-            if is_down:
-                self.stats["buttons_pressed"].add(k)
-                self.btn_widgets[k].config(bg="#22c55e", fg="#ffffff")
-            else:
-                self.btn_widgets[k].config(bg="#27272a", fg="#71717a")
+        self.root.after(16, self._update_loop)
 
-        self.root.after(16, self.update_ui_loop)
-
-    def on_close(self):
+    def _on_close(self):
         self.running = False
-        if self.ds_handle:
-            self.send_dualsense_report(0, 0, 0, 0, 0, 0, 0, 0)
-            kernel32.CloseHandle(self.ds_handle)
-            self.ds_handle = None
-
-        self.stats["buttons_pressed"] = list(self.stats["buttons_pressed"])
-        self.stats["dpad_directions"] = list(self.stats["dpad_directions"])
-        self.stats["end_time"] = time.strftime("%Y-%m-%d %H:%M:%S")
-
-        out_path = r"C:\Users\Carlos\.gemini\antigravity\brain\b1f856c8-3cb2-4343-8024-31abac071e1b\scratch\gamepad_test_results.json"
-        with open(out_path, "w", encoding="utf-8") as f:
-            json.dump(self.stats, f, indent=2, ensure_ascii=False)
-
+        self.driver.close()
         self.root.destroy()
 
 if __name__ == "__main__":
