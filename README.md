@@ -1,4 +1,4 @@
-﻿# 🎮 GTA San Andreas — DualSense PS5 Mod
+# 🎮 GTA San Andreas — DualSense PS5 Mod
 
 > Full DualSense PS5 controller support for Grand Theft Auto: San Andreas PC
 > Adaptive triggers · Haptic rumble · Lightbar HP colors · D-Pad menu navigation
@@ -35,11 +35,21 @@
 | Crítico | Vermelho piscando |
 | Morto | Apagado |
 
+### 🎯 Mira Automática de Console (Auto-Aim / Lock-On)
+- **Mira no L2**: Pressione L2 para travar a mira automaticamente no alvo mais próximo com o retículo clássico colorido de saúde do GTA dos consoles.
+- **Troca de Alvo**: Mova o analógico direito para alternar rapidamente entre diferentes inimigos no campo de visão.
+
+### 🏃 Andar & Esquivar Mirando (Move & Strafe While Aiming)
+- Permite que o CJ ande, corra e faça esquiva lateral enquanto mira e atira com **qualquer arma pesada** (M4, AK-47, Shotguns, Minigun, Sniper, etc.), removendo o travamento de pés original do GTA San Andreas de 2004.
+
+### ⌨️🎮 Controle + Teclado Simultâneo
+- Jogabilidade híbrida perfeita: use o DualSense junto com teclado e mouse ao mesmo tempo sem conflito de inputs.
+
 ### 🗺️ Navegação de Menu com D-Pad
-- **D-Pad ↑↓** → navegação nos menus do jogo (pause, inventário)
-- **D-Pad ←→** → seleção lateral / abas
-- **Share button** → abre o Mapa (equivalente a `M` no teclado)
-- **Options / Start button** → abre o menu de pause
+- **D-Pad ↑↓** → navegação nos menus do jogo (pause, inventário, opções)
+- **D-Pad ←→** → seleção lateral / alternar abas
+- **Share button** → abre o Mapa do jogo diretamente
+- **Options button** → abre o menu de pause
 
 ---
 

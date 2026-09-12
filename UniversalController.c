@@ -6,6 +6,7 @@
 #include <stdlib.h>
 #include <stdio.h>
 #include <math.h>
+#include <stdbool.h>
 
 // ============================================================================
 // GTA San Andreas Engine Structures & Constants (v1.0 US)
@@ -89,7 +90,6 @@ typedef struct {
 typedef void* (*tFindPlayerVehicle)(int playerId, BOOL bIncludeRemote);
 #define FUNC_FindPlayerVehicle ((tFindPlayerVehicle)0x0056E0D0)
 
-
 #define ADDR_MOUSE_STATE         0x00B73418
 
 #define ADDR_GAME_INVERTMOUSE_Y  0x00BA6745
@@ -111,6 +111,154 @@ typedef char (__attribute__((thiscall)) *tSwitchToNewScreen)(void* thisMgr, char
 
 typedef void (__attribute__((thiscall)) *tProcessUserInput)(void* thisMgr, char down, char up, char enter, char exit, char input);
 #define FUNC_ProcessUserInput ((tProcessUserInput)0x0057B480)
+
+static void LogMsg(const char* fmt, ...);
+
+// ============================================================================
+// RenderWare & CFont Definitions for PS5 Button Icons
+// ============================================================================
+
+typedef int (__cdecl *tAddTxdSlot)(const char* name);
+typedef bool (__cdecl *tLoadTxd)(int slot, const char* filename);
+typedef void (__cdecl *tAddRef)(int slot);
+typedef void (__cdecl *tPushCurrentTxd)(void);
+typedef void (__cdecl *tPopCurrentTxd)(void);
+typedef void (__cdecl *tSetCurrentTxd)(int slot);
+typedef void (__attribute__((thiscall)) *tSetTexture)(void* thisSprite, const char* name, const char* mask);
+
+#define FUNC_CTxdStore_AddTxdSlot      ((tAddTxdSlot)0x00731A00)
+#define FUNC_CTxdStore_LoadTxd         ((tLoadTxd)0x007320B0)
+#define FUNC_CTxdStore_AddRef          ((tAddRef)0x00731CD0)
+#define FUNC_CTxdStore_PushCurrentTxd  ((tPushCurrentTxd)0x007316A0)
+#define FUNC_CTxdStore_PopCurrentTxd   ((tPopCurrentTxd)0x007316B0)
+#define FUNC_CTxdStore_SetCurrentTxd   ((tSetCurrentTxd)0x007319C0)
+#define FUNC_CSprite2d_SetTexture      ((tSetTexture)0x007272B0)
+
+// Array of 16 CSprite2d structs (each CSprite2d is 4 bytes: void* m_pTexture)
+static void* g_ps5ButtonSprites[16] = { 0 };
+
+static const char* s_psButtonNames[16] = {
+    NULL,          // 0: Unused
+    "cross",       // 1: ~N~
+    "circle",      // 2: ~A~
+    "square",      // 3: ~<~
+    "triangle",    // 4: ~=~
+    "up",          // 5: ~Q~
+    "down",        // 6: ~H~
+    "left",        // 7: ~J~
+    "right",       // 8: ~M~
+    "l1",          // 9: ~E~
+    "l2",          // 10: ~F~
+    "r1",          // 11: ~>~
+    "r2",          // 12: ~D~
+    "l3",          // 13: ~O~
+    "r3",          // 14: ~@~
+    NULL           // 15
+};
+
+typedef struct {
+    const char* token;
+    const char* replacement;
+} KeyTokenMap;
+
+static const KeyTokenMap s_keyMap[] = {
+    // A pe (On foot)
+    { "~k~~PED_FIREWEAPON~",              "~D~" }, // R2 (Disparar)
+    { "~k~~PED_FIREWEAPON_ALT~",          "~D~" }, // R2
+    { "~k~~PED_LOCK_TARGET~",             "~F~" }, // L2 (Mirar / Lock-on)
+    { "~k~~PED_SPRINT~",                  "~N~" }, // Cross (Correr)
+    { "~k~~PED_JUMPING~",                 "~<~" }, // Square (Pular)
+    { "~k~~PED_DUCK~",                    "~O~" }, // L3 (Agachar)
+    { "~k~~PED_LOOKBEHIND~",              "~@~" }, // R3 (Olhar para tras)
+    { "~k~~PED_CYCLE_WEAPON_LEFT~",       "~E~" }, // L1 (Arma anterior)
+    { "~k~~PED_CYCLE_WEAPON_RIGHT~",      "~>~" }, // R1 (Arma seguinte)
+    { "~k~~PED_CYCLE_TARGET_LEFT~",       "~E~" }, // L1
+    { "~k~~PED_CYCLE_TARGET_RIGHT~",      "~>~" }, // R1
+    { "~k~~PED_ANSWER_PHONE~",            "~=~" }, // Triangle (Atender telefone)
+    { "~k~~PED_SNIPER_ZOOM_IN~",          "~<~" }, // Square
+    { "~k~~PED_SNIPER_ZOOM_OUT~",         "~N~" }, // Cross
+    { "~k~~PED_1RST_PERSON_LOOK_LEFT~",   "~J~" }, // D-Pad Esquerda
+    { "~k~~PED_1RST_PERSON_LOOK_RIGHT~",  "~M~" }, // D-Pad Direita
+    { "~k~~PED_1RST_PERSON_LOOK_UP~",     "~Q~" }, // D-Pad Cima
+    { "~k~~PED_1RST_PERSON_LOOK_DOWN~",   "~H~" }, // D-Pad Baixo
+    { "~k~~PED_CENTER_CAMERA_BEHIND_PLAYER~", "~@~" }, // R3
+
+    // Em veiculo (In Vehicle)
+    { "~k~~VEHICLE_ACCELERATE~",          "~D~" }, // R2 (Acelerar)
+    { "~k~~VEHICLE_BRAKE~",               "~F~" }, // L2 (Freio / Marcha a re)
+    { "~k~~VEHICLE_HANDBRAKE~",           "~>~" }, // R1 (Freio de mao)
+    { "~k~~VEHICLE_FIREWEAPON~",          "~A~" }, // Circle (Atirar do veiculo)
+    { "~k~~VEHICLE_FIREWEAPON_ALT~",      "~A~" }, // Circle
+    { "~k~~VEHICLE_ENTER_EXIT~",          "~=~" }, // Triangle (Sair/Entrar)
+    { "~k~~VEHICLE_HORN~",                "~O~" }, // L3 (Buzina)
+    { "~k~~VEHICLE_LOOKBEHIND~",          "~E~" }, // L1 (Olhar tras)
+    { "~k~~VEHICLE_LOOKLEFT~",            "~J~" }, // D-Pad Esquerda
+    { "~k~~VEHICLE_LOOKRIGHT~",           "~M~" }, // D-Pad Direita
+    { "~k~~VEHICLE_RADIO_STATION_UP~",    "~Q~" }, // D-Pad Cima (Mudar radio)
+    { "~k~~VEHICLE_RADIO_STATION_DOWN~",  "~H~" }, // D-Pad Baixo
+    { "~k~~VEHICLE_TURRETLEFT~",          "~J~" }, // D-Pad Esquerda
+    { "~k~~VEHICLE_TURRETRIGHT~",         "~M~" }, // D-Pad Direita
+    { "~k~~VEHICLE_TURRETUP~",            "~Q~" }, // D-Pad Cima
+    { "~k~~VEHICLE_TURRETDOWN~",          "~H~" }, // D-Pad Baixo
+
+    // Conversas e Grupo (Gang / Conversation)
+    { "~k~~CONVERSATION_YES~",            "~M~" }, // D-Pad Direita (Sim)
+    { "~k~~CONVERSATION_NO~",             "~J~" }, // D-Pad Esquerda (Nao)
+    { "~k~~GROUP_CONTROL_FWD~",           "~Q~" }, // D-Pad Cima (Avancar)
+    { "~k~~GROUP_CONTROL_BWD~",           "~H~" }  // D-Pad Baixo (Recuar)
+};
+
+
+
+static void InitPS5Buttons(void) {
+    static BOOL s_done = FALSE;
+    if (s_done) return;
+    s_done = TRUE;
+
+    LogMsg("[PS5 Buttons] Loading models\\ps3btns.txd...\n");
+    int slot = FUNC_CTxdStore_AddTxdSlot("ps3btns");
+    if (slot >= 0) {
+        if (FUNC_CTxdStore_LoadTxd(slot, "models\\ps3btns.txd")) {
+            FUNC_CTxdStore_AddRef(slot);
+            FUNC_CTxdStore_PushCurrentTxd();
+            FUNC_CTxdStore_SetCurrentTxd(slot);
+            for (int i = 1; i <= 14; i++) {
+                if (s_psButtonNames[i]) {
+                    FUNC_CSprite2d_SetTexture(&g_ps5ButtonSprites[i], s_psButtonNames[i], NULL);
+                }
+            }
+            FUNC_CTxdStore_PopCurrentTxd();
+            LogMsg("[PS5 Buttons] Successfully loaded 14 PlayStation button textures!\n");
+
+            // Patch CFont::PrintChar displacement at 0x00718AE1
+            DWORD oldProtect;
+            if (VirtualProtect((LPVOID)0x00718AE1, 4, PAGE_EXECUTE_READWRITE, &oldProtect)) {
+                *(DWORD*)0x00718AE1 = (DWORD)g_ps5ButtonSprites;
+                VirtualProtect((LPVOID)0x00718AE1, 4, oldProtect, &oldProtect);
+                LogMsg("[PS5 Buttons] CFont::PrintChar table patched to g_ps5ButtonSprites!\n");
+            }
+        } else {
+            LogMsg("[PS5 Buttons] Failed to load models\\ps3btns.txd\n");
+        }
+    } else {
+        LogMsg("[PS5 Buttons] Failed to add TXD slot ps3btns\n");
+    }
+}
+
+static void EnsureMoveWhileAiming(void) {
+    DWORD* pFlagsM4 = (DWORD*)(0x00C8AAB8 + 30 * 0x70 + 0x18);
+    if (!(*pFlagsM4 & 0x10)) {
+        DWORD oldProtect;
+        if (VirtualProtect((LPVOID)0x00C8AAB8, 80 * 0x70, PAGE_EXECUTE_READWRITE, &oldProtect)) {
+            for (int i = 0; i < 80; i++) {
+                DWORD* pFlags = (DWORD*)(0x00C8AAB8 + i * 0x70 + 0x18);
+                *pFlags |= 0x30; // bMoveAim (0x10) | bMoveFire (0x20)
+            }
+            VirtualProtect((LPVOID)0x00C8AAB8, 80 * 0x70, oldProtect, &oldProtect);
+            LogMsg("[MoveWhileAim] bMoveAim and bMoveFire applied to all 80 weapons!\n");
+        }
+    }
+}
 
 // ============================================================================
 // Mod Configuration & Logging
@@ -232,11 +380,22 @@ static unsigned char g_targetLeftMotor = 0;
 static unsigned char g_targetRightMotor = 0;
 static unsigned char g_lastSentLeftMotor = 0xFF;
 static unsigned char g_lastSentRightMotor = 0xFF;
+static volatile BOOL g_triggerGunActive = FALSE;
+static volatile BOOL g_lastSentTriggerGun = FALSE;
 static DWORD g_lastOutputTick = 0;
 
 // ============================================================================
 // Dynamic HID & Controller Detection (Zero Hardcoded Keys/Paths)
 // ============================================================================
+
+typedef enum {
+    SONY_DEV_NONE = 0,
+    SONY_DEV_DUALSENSE,  // PS5: 0x0CE6, 0x0DF2
+    SONY_DEV_DUALSHOCK4  // PS4: 0x05C4, 0x09CC
+} SonyDeviceType;
+
+static volatile SonyDeviceType g_sonyDevType = SONY_DEV_NONE;
+static volatile BOOL g_sonyIsBluetooth = FALSE;
 
 static HANDLE FindAndOpenDualSenseDevice(void) {
     GUID hidGuid;
@@ -262,7 +421,6 @@ static HANDLE FindAndOpenDualSenseDevice(void) {
         pDetail->cbSize = sizeof(SP_DEVICE_INTERFACE_DETAIL_DATA_A);
 
         if (SetupDiGetDeviceInterfaceDetailA(devInfo, &devData, pDetail, detailSize, NULL, NULL)) {
-            // Check if device path belongs to Sony (VID 054C)
             const char* path = pDetail->DevicePath;
             if (strstr(path, "054c") || strstr(path, "054C") || strstr(path, "vid_054c") || strstr(path, "VID_054C")) {
                 HANDLE h = CreateFileA(path,
@@ -273,14 +431,22 @@ static HANDLE FindAndOpenDualSenseDevice(void) {
                     HIDD_ATTRIBUTES attr;
                     attr.Size = sizeof(HIDD_ATTRIBUTES);
                     if (HidD_GetAttributes(h, &attr)) {
-                        if (attr.VendorID == 0x054C &&
-                            (attr.ProductID == 0x0CE6 || attr.ProductID == 0x0DF2 ||
-                             attr.ProductID == 0x05C4 || attr.ProductID == 0x09CC)) {
-                            LogMsg("[DualSense] Auto-detected Sony Gamepad (VID=0x%04X, PID=0x%04X)\n",
-                                   attr.VendorID, attr.ProductID);
-                            hFound = h;
-                            free(pDetail);
-                            break;
+                        if (attr.VendorID == 0x054C) {
+                            if (attr.ProductID == 0x0CE6 || attr.ProductID == 0x0DF2) {
+                                g_sonyDevType = SONY_DEV_DUALSENSE;
+                                LogMsg("[SonyHID] Auto-detected Sony DualSense (PS5) (VID=0x%04X, PID=0x%04X)\n",
+                                       attr.VendorID, attr.ProductID);
+                                hFound = h;
+                                free(pDetail);
+                                break;
+                            } else if (attr.ProductID == 0x05C4 || attr.ProductID == 0x09CC) {
+                                g_sonyDevType = SONY_DEV_DUALSHOCK4;
+                                LogMsg("[SonyHID] Auto-detected Sony DualShock 4 (PS4) (VID=0x%04X, PID=0x%04X)\n",
+                                       attr.VendorID, attr.ProductID);
+                                hFound = h;
+                                free(pDetail);
+                                break;
+                            }
                         }
                     }
                     CloseHandle(h);
@@ -297,55 +463,106 @@ static volatile BYTE g_lightbarRed = 0;
 static volatile BYTE g_lightbarGreen = 120;
 static volatile BYTE g_lightbarBlue = 255;
 
-static void SendDualSenseHardwareReport(HANDLE hDev, BYTE leftMotor, BYTE rightMotor) {
-    BYTE report[78];
-    memset(report, 0, sizeof(report));
+static void SendDualSenseHardwareReport(HANDLE hDev, BYTE leftMotor, BYTE rightMotor, BOOL gunTrigger) {
+    if (g_sonyDevType == SONY_DEV_DUALSENSE) {
+        BYTE report[78];
+        memset(report, 0, sizeof(report));
 
-    report[0] = 0x31; // Report ID
-    report[1] = 0x02; // Config tag
-    report[2] = 0xFF; // Enable motors + triggers
-    report[3] = 0x1 | 0x2 | 0x4 | 0x10 | 0x40; // Enable LEDs and lightbar
-    report[4] = rightMotor; // High-frequency weak rumble
-    report[5] = leftMotor;  // Low-frequency strong rumble
+        report[0] = 0x31; // Report ID
+        report[1] = 0x02; // Config tag
+        report[2] = 0xFF; // Enable motors + triggers
+        report[3] = 0x1 | 0x2 | 0x4 | 0x10 | 0x40; // Enable LEDs and lightbar
+        report[4] = rightMotor; // High-frequency weak rumble
+        report[5] = leftMotor;  // Low-frequency strong rumble
 
-    // R2: Mode 0x02 (Section Resistance / Rigid Stop: CURTO E FORTE!)
-    report[11] = 0x02;
-    report[12] = 0x02;
-    report[13] = 20;  // Start position (batente mecânico curto imediato!)
-    report[14] = 255; // Força máxima!
+        // R2 (Gatilho de Disparo): Resistência mecânica ATIVADA SOMENTE COM ARMA DE FOGO!
+        // Sem arma / Em veículo / Menus: 100% suave e livre, sem resistência desnecessária!
+        if (gunTrigger) {
+            report[11] = 0x02; // Section Resistance / Rigid Stop
+            report[12] = 0x02;
+            report[13] = 25;   // Ponto onde o gatilho começa a oferecer resistência
+            report[14] = 175;  // Resistência tátil de peso de gatilho
+        } else {
+            report[11] = 0x00; // Desativado
+            report[12] = 0x00;
+            report[13] = 0;
+            report[14] = 0;
+        }
 
-    // L2: Mode 0x02 (Batente tátil para mira e freio)
-    report[22] = 0x02;
-    report[23] = 0x02;
-    report[24] = 25;  // Start position
-    report[25] = 240; // Força alta
+        // L2 (ONDE MIRA): NUNCA TEM RESISTÊNCIA! 100% suave e livre conforme pedido do usuário!
+        report[22] = 0x00;
+        report[23] = 0x00;
+        report[24] = 0;
+        report[25] = 0;
 
-    // Lightbar & Player LEDs
-    report[40] = 0x02; // Uninterruptable LED
-    report[43] = 0x00;
-    report[44] = 0x00; // Brightness High
-    report[45] = 0x04; // Player 1 LED
-    report[46] = g_lightbarRed;
-    report[47] = g_lightbarGreen;
-    report[48] = g_lightbarBlue;
+        // Lightbar & Player LEDs
+        report[40] = 0x02; // Uninterruptable LED
+        report[43] = 0x00;
+        report[44] = 0x00; // Brightness High
+        report[45] = 0x04; // Player 1 LED
+        report[46] = g_lightbarRed;
+        report[47] = g_lightbarGreen;
+        report[48] = g_lightbarBlue;
 
-    // CRC32 of 0xA2 + report[0..73]
-    BYTE crcBuf[75];
-    crcBuf[0] = 0xA2;
-    memcpy(crcBuf + 1, report, 74);
-    DWORD crc = ComputeCrc32(crcBuf, 75);
+        // CRC32 of 0xA2 + report[0..73]
+        BYTE crcBuf[75];
+        crcBuf[0] = 0xA2;
+        memcpy(crcBuf + 1, report, 74);
+        DWORD crc = ComputeCrc32(crcBuf, 75);
 
-    report[74] = (BYTE)(crc & 0xFF);
-    report[75] = (BYTE)((crc >> 8) & 0xFF);
-    report[76] = (BYTE)((crc >> 16) & 0xFF);
-    report[77] = (BYTE)((crc >> 24) & 0xFF);
+        report[74] = (BYTE)(crc & 0xFF);
+        report[75] = (BYTE)((crc >> 8) & 0xFF);
+        report[76] = (BYTE)((crc >> 16) & 0xFF);
+        report[77] = (BYTE)((crc >> 24) & 0xFF);
 
-    DWORD written = 0;
-    WriteFile(hDev, report, 78, &written, NULL);
+        DWORD written = 0;
+        WriteFile(hDev, report, 78, &written, NULL);
+    } else if (g_sonyDevType == SONY_DEV_DUALSHOCK4) {
+        if (g_sonyIsBluetooth) {
+            // DS4 Bluetooth Output Report 0x11 (78 bytes)
+            BYTE report[78];
+            memset(report, 0, sizeof(report));
+            report[0] = 0x11;
+            report[1] = 0xC0 | 0x04;
+            report[3] = 0x03; // Enable rumble + lightbar
+            report[6] = rightMotor; // High-frequency weak rumble
+            report[7] = leftMotor;  // Low-frequency strong rumble
+            report[8] = g_lightbarRed;
+            report[9] = g_lightbarGreen;
+            report[10] = g_lightbarBlue;
+
+            BYTE crcBuf[75];
+            crcBuf[0] = 0xA2;
+            memcpy(crcBuf + 1, report, 74);
+            DWORD crc = ComputeCrc32(crcBuf, 75);
+
+            report[74] = (BYTE)(crc & 0xFF);
+            report[75] = (BYTE)((crc >> 8) & 0xFF);
+            report[76] = (BYTE)((crc >> 16) & 0xFF);
+            report[77] = (BYTE)((crc >> 24) & 0xFF);
+
+            DWORD written = 0;
+            WriteFile(hDev, report, 78, &written, NULL);
+        } else {
+            // DS4 USB Output Report 0x05 (32 bytes)
+            BYTE report[32];
+            memset(report, 0, sizeof(report));
+            report[0] = 0x05;
+            report[1] = 0x07; // Enable rumble right, left, LED
+            report[4] = rightMotor;
+            report[5] = leftMotor;
+            report[6] = g_lightbarRed;
+            report[7] = g_lightbarGreen;
+            report[8] = g_lightbarBlue;
+
+            DWORD written = 0;
+            WriteFile(hDev, report, 32, &written, NULL);
+        }
+    }
 }
 
 static DWORD WINAPI DualSenseWorkerThread(LPVOID lpParam) {
-    LogMsg("[DualSense] Native HID Worker Thread started (Dynamic Discovery).\n");
+    LogMsg("[SonyHID] Worker Thread started (DualSense & DualShock 4 Support).\n");
 
     BYTE buf[78];
     DWORD readBytes = 0;
@@ -354,74 +571,164 @@ static DWORD WINAPI DualSenseWorkerThread(LPVOID lpParam) {
         if (g_hDualSense == INVALID_HANDLE_VALUE) {
             g_hDualSense = FindAndOpenDualSenseDevice();
             if (g_hDualSense != INVALID_HANDLE_VALUE) {
-                LogMsg("[DualSense] Connected successfully via Dynamic Native HID!\n");
-                SendDualSenseHardwareReport(g_hDualSense, 0, 0);
+                LogMsg("[SonyHID] Controller connected! Type: %s\n",
+                       g_sonyDevType == SONY_DEV_DUALSHOCK4 ? "DualShock 4 (PS4)" : "DualSense (PS5)");
                 g_lastSentLeftMotor = 0;
                 g_lastSentRightMotor = 0;
+                g_lastSentTriggerGun = FALSE;
                 g_lastOutputTick = GetTickCount();
+                SendDualSenseHardwareReport(g_hDualSense, 0, 0, FALSE);
             } else {
                 Sleep(1000);
                 continue;
             }
         }
 
-        // 1. Output update (Rumble & Trigger heartbeat)
+        // 1. Output update (Rumble, Triggers & Lightbar heartbeat)
         DWORD now = GetTickCount();
         BOOL motorChanged = (g_targetLeftMotor != g_lastSentLeftMotor || g_targetRightMotor != g_lastSentRightMotor);
+        BOOL triggerChanged = (g_triggerGunActive != g_lastSentTriggerGun);
         BOOL heartbeat = (now - g_lastOutputTick) >= 400;
 
-        if (motorChanged || heartbeat) {
+        if (motorChanged || triggerChanged || heartbeat) {
             g_lastSentLeftMotor = g_targetLeftMotor;
             g_lastSentRightMotor = g_targetRightMotor;
+            g_lastSentTriggerGun = g_triggerGunActive;
             g_lastOutputTick = now;
-            SendDualSenseHardwareReport(g_hDualSense, g_lastSentLeftMotor, g_lastSentRightMotor);
+            SendDualSenseHardwareReport(g_hDualSense, g_lastSentLeftMotor, g_lastSentRightMotor, g_lastSentTriggerGun);
         }
 
-        // 2. Read hardware input stream (Supports BT report 0x31 and USB report 0x01)
+        // 2. Read hardware input stream
         if (ReadFile(g_hDualSense, buf, 78, &readBytes, NULL) && readBytes >= 10) {
-            int base = (buf[0] == 0x31) ? 2 : 1;
+            if (g_sonyDevType == SONY_DEV_DUALSHOCK4) {
+                if (buf[0] == 0x11 && readBytes >= 12) {
+                    // DS4 Bluetooth (Report 0x11)
+                    g_sonyIsBluetooth = TRUE;
+                    g_dsInput.lx = (short)((int)buf[3] - 128);
+                    g_dsInput.ly = (short)((int)buf[4] - 128);
+                    g_dsInput.rx = (short)((int)buf[5] - 128);
+                    g_dsInput.ry = (short)((int)buf[6] - 128);
 
-            g_dsInput.lx = (short)((int)buf[base + 0] - 128);
-            g_dsInput.ly = (short)((int)buf[base + 1] - 128);
-            g_dsInput.rx = (short)((int)buf[base + 2] - 128);
-            g_dsInput.ry = (short)((int)buf[base + 3] - 128);
-            g_dsInput.l2 = buf[base + 4];
-            g_dsInput.r2 = buf[base + 5];
+                    BYTE b0 = buf[7];
+                    g_dsInput.btnSquare   = (b0 & 0x10) != 0;
+                    g_dsInput.btnCross    = (b0 & 0x20) != 0;
+                    g_dsInput.btnCircle   = (b0 & 0x40) != 0;
+                    g_dsInput.btnTriangle = (b0 & 0x80) != 0;
 
-            BYTE b0 = buf[base + 7];
-            g_dsInput.btnSquare   = (b0 & 0x10) != 0;
-            g_dsInput.btnCross    = (b0 & 0x20) != 0;
-            g_dsInput.btnCircle   = (b0 & 0x40) != 0;
-            g_dsInput.btnTriangle = (b0 & 0x80) != 0;
+                    BYTE dpad = b0 & 0x0F;
+                    g_dsInput.dpadUp    = (dpad == 0 || dpad == 1 || dpad == 7);
+                    g_dsInput.dpadRight = (dpad == 1 || dpad == 2 || dpad == 3);
+                    g_dsInput.dpadDown  = (dpad == 3 || dpad == 4 || dpad == 5);
+                    g_dsInput.dpadLeft  = (dpad == 5 || dpad == 6 || dpad == 7);
 
-            BYTE dpad = b0 & 0x0F;
-            g_dsInput.dpadUp    = (dpad == 0 || dpad == 1 || dpad == 7);
-            g_dsInput.dpadRight = (dpad == 1 || dpad == 2 || dpad == 3);
-            g_dsInput.dpadDown  = (dpad == 3 || dpad == 4 || dpad == 5);
-            g_dsInput.dpadLeft  = (dpad == 5 || dpad == 6 || dpad == 7);
+                    BYTE b1 = buf[8];
+                    g_dsInput.btnL1     = (b1 & 0x01) != 0;
+                    g_dsInput.btnR1     = (b1 & 0x02) != 0;
+                    g_dsInput.btnL2     = (b1 & 0x04) != 0;
+                    g_dsInput.btnR2     = (b1 & 0x08) != 0;
+                    g_dsInput.btnShare  = (b1 & 0x10) != 0;
+                    g_dsInput.btnStart  = (b1 & 0x20) != 0;
+                    g_dsInput.btnL3     = (b1 & 0x40) != 0;
+                    g_dsInput.btnR3     = (b1 & 0x80) != 0;
 
-            BYTE b1 = buf[base + 8];
-            g_dsInput.btnL1     = (b1 & 0x01) != 0;
-            g_dsInput.btnR1     = (b1 & 0x02) != 0;
-            g_dsInput.btnL2     = (b1 & 0x04) != 0;
-            g_dsInput.btnR2     = (b1 & 0x08) != 0;
-            g_dsInput.btnShare  = (b1 & 0x10) != 0;
-            g_dsInput.btnStart  = (b1 & 0x20) != 0;
-            g_dsInput.btnL3     = (b1 & 0x40) != 0;
-            g_dsInput.btnR3     = (b1 & 0x80) != 0;
+                    BYTE b2 = buf[9];
+                    g_dsInput.btnPS     = (b2 & 0x01) != 0;
+                    g_dsInput.btnTouch  = (b2 & 0x02) != 0;
+                    g_dsInput.btnSelect = g_dsInput.btnShare || g_dsInput.btnTouch;
 
-            BYTE b2 = (readBytes > (DWORD)(base + 9)) ? buf[base + 9] : 0;
-            g_dsInput.btnPS     = (b2 & 0x01) != 0;
-            g_dsInput.btnTouch  = (b2 & 0x02) != 0;
-            g_dsInput.btnSelect = g_dsInput.btnShare || g_dsInput.btnTouch;
+                    g_dsInput.l2 = buf[10];
+                    g_dsInput.r2 = buf[11];
 
-            g_dsInput.connected = TRUE;
+                    g_dsInput.connected = TRUE;
+                } else {
+                    // DS4 USB / Standard (Report 0x01)
+                    g_sonyIsBluetooth = FALSE;
+                    int base = (buf[0] == 0x01) ? 1 : 0;
+                    g_dsInput.lx = (short)((int)buf[base + 0] - 128);
+                    g_dsInput.ly = (short)((int)buf[base + 1] - 128);
+                    g_dsInput.rx = (short)((int)buf[base + 2] - 128);
+                    g_dsInput.ry = (short)((int)buf[base + 3] - 128);
+
+                    BYTE b0 = buf[base + 4];
+                    g_dsInput.btnSquare   = (b0 & 0x10) != 0;
+                    g_dsInput.btnCross    = (b0 & 0x20) != 0;
+                    g_dsInput.btnCircle   = (b0 & 0x40) != 0;
+                    g_dsInput.btnTriangle = (b0 & 0x80) != 0;
+
+                    BYTE dpad = b0 & 0x0F;
+                    g_dsInput.dpadUp    = (dpad == 0 || dpad == 1 || dpad == 7);
+                    g_dsInput.dpadRight = (dpad == 1 || dpad == 2 || dpad == 3);
+                    g_dsInput.dpadDown  = (dpad == 3 || dpad == 4 || dpad == 5);
+                    g_dsInput.dpadLeft  = (dpad == 5 || dpad == 6 || dpad == 7);
+
+                    BYTE b1 = buf[base + 5];
+                    g_dsInput.btnL1     = (b1 & 0x01) != 0;
+                    g_dsInput.btnR1     = (b1 & 0x02) != 0;
+                    g_dsInput.btnL2     = (b1 & 0x04) != 0;
+                    g_dsInput.btnR2     = (b1 & 0x08) != 0;
+                    g_dsInput.btnShare  = (b1 & 0x10) != 0;
+                    g_dsInput.btnStart  = (b1 & 0x20) != 0;
+                    g_dsInput.btnL3     = (b1 & 0x40) != 0;
+                    g_dsInput.btnR3     = (b1 & 0x80) != 0;
+
+                    BYTE b2 = buf[base + 6];
+                    g_dsInput.btnPS     = (b2 & 0x01) != 0;
+                    g_dsInput.btnTouch  = (b2 & 0x02) != 0;
+                    g_dsInput.btnSelect = g_dsInput.btnShare || g_dsInput.btnTouch;
+
+                    g_dsInput.l2 = buf[base + 7];
+                    g_dsInput.r2 = buf[base + 8];
+
+                    g_dsInput.connected = TRUE;
+                }
+            } else {
+                // DualSense PS5 parsing (Report 0x31 BT or 0x01 USB)
+                int base = (buf[0] == 0x31) ? 2 : 1;
+                g_sonyIsBluetooth = (buf[0] == 0x31);
+
+                g_dsInput.lx = (short)((int)buf[base + 0] - 128);
+                g_dsInput.ly = (short)((int)buf[base + 1] - 128);
+                g_dsInput.rx = (short)((int)buf[base + 2] - 128);
+                g_dsInput.ry = (short)((int)buf[base + 3] - 128);
+                g_dsInput.l2 = buf[base + 4];
+                g_dsInput.r2 = buf[base + 5];
+
+                BYTE b0 = buf[base + 7];
+                g_dsInput.btnSquare   = (b0 & 0x10) != 0;
+                g_dsInput.btnCross    = (b0 & 0x20) != 0;
+                g_dsInput.btnCircle   = (b0 & 0x40) != 0;
+                g_dsInput.btnTriangle = (b0 & 0x80) != 0;
+
+                BYTE dpad = b0 & 0x0F;
+                g_dsInput.dpadUp    = (dpad == 0 || dpad == 1 || dpad == 7);
+                g_dsInput.dpadRight = (dpad == 1 || dpad == 2 || dpad == 3);
+                g_dsInput.dpadDown  = (dpad == 3 || dpad == 4 || dpad == 5);
+                g_dsInput.dpadLeft  = (dpad == 5 || dpad == 6 || dpad == 7);
+
+                BYTE b1 = buf[base + 8];
+                g_dsInput.btnL1     = (b1 & 0x01) != 0;
+                g_dsInput.btnR1     = (b1 & 0x02) != 0;
+                g_dsInput.btnL2     = (b1 & 0x04) != 0;
+                g_dsInput.btnR2     = (b1 & 0x08) != 0;
+                g_dsInput.btnShare  = (b1 & 0x10) != 0;
+                g_dsInput.btnStart  = (b1 & 0x20) != 0;
+                g_dsInput.btnL3     = (b1 & 0x40) != 0;
+                g_dsInput.btnR3     = (b1 & 0x80) != 0;
+
+                BYTE b2 = (readBytes > (DWORD)(base + 9)) ? buf[base + 9] : 0;
+                g_dsInput.btnPS     = (b2 & 0x01) != 0;
+                g_dsInput.btnTouch  = (b2 & 0x02) != 0;
+                g_dsInput.btnSelect = g_dsInput.btnShare || g_dsInput.btnTouch;
+
+                g_dsInput.connected = TRUE;
+            }
         } else {
             DWORD err = GetLastError();
             if (err == ERROR_DEVICE_NOT_CONNECTED || err == ERROR_GEN_FAILURE || err == ERROR_INVALID_HANDLE) {
-                LogMsg("[DualSense] Controller disconnected, scanning for reconnect...\n");
+                LogMsg("[SonyHID] Controller disconnected, scanning for reconnect...\n");
                 CloseHandle(g_hDualSense);
                 g_hDualSense = INVALID_HANDLE_VALUE;
+                g_sonyDevType = SONY_DEV_NONE;
                 g_dsInput.connected = FALSE;
             }
             Sleep(5);
@@ -429,9 +736,10 @@ static DWORD WINAPI DualSenseWorkerThread(LPVOID lpParam) {
     }
 
     if (g_hDualSense != INVALID_HANDLE_VALUE) {
-        SendDualSenseHardwareReport(g_hDualSense, 0, 0);
+        SendDualSenseHardwareReport(g_hDualSense, 0, 0, FALSE);
         CloseHandle(g_hDualSense);
         g_hDualSense = INVALID_HANDLE_VALUE;
+        g_sonyDevType = SONY_DEV_NONE;
     }
     return 0;
 }
@@ -582,6 +890,34 @@ static short ApplyDeadzoneVal(short val, int percent) {
 }
 
 // ============================================================================
+// Weapon Recognition (Adaptive Triggers Active ONLY for Firearms!)
+// ============================================================================
+
+static BOOL IsPlayerHoldingFirearm(void) {
+    void* pVeh = FUNC_FindPlayerVehicle(-1, FALSE);
+    if (pVeh) return FALSE; // Em veículo: gatilho de arma desativado! Aceleração analógica suave.
+
+    BYTE* pPed = *(BYTE**)0x00B7CD98; // CWorld::Players[0].m_pPed
+    if (!pPed) return FALSE;
+
+    BYTE slot = *(BYTE*)(pPed + 0x718); // m_nActiveWeaponSlot
+    // Slots de armas de fogo:
+    // 2: Pistolas (Pistol, Silenced, Desert Eagle)
+    // 3: Espingardas (Shotgun, Sawn-off, SPAS-12)
+    // 4: Submetralhadoras (Micro Uzi, MP5, Tec-9)
+    // 5: Fuzis de Assalto (AK-47, M4)
+    // 6: Rifles de Precisão (Country Rifle, Sniper Rifle)
+    // 7: Armas Pesadas (Rocket Launcher, Heat Seeker, Flamethrower, Minigun)
+    if (slot >= 2 && slot <= 7) {
+        DWORD weaponType = *(DWORD*)(pPed + 0x5A0 + slot * 0x1C);
+        if (weaponType >= 22 && weaponType <= 38) {
+            return TRUE;
+        }
+    }
+    return FALSE;
+}
+
+// ============================================================================
 // Controller Processing & Engine Injection
 // ============================================================================
 
@@ -611,86 +947,95 @@ static void ProcessCustomController(CPad* pad) {
 
     DWORD now = GetTickCount();
 
-    // Debug: log raw HID data every 5 seconds to confirm data is flowing
-    static DWORD s_lastDbgLog = 0;
-    if (now - s_lastDbgLog > 5000) {
-        s_lastDbgLog = now;
-        LogMsg("[DBG] HID raw: lx=%d ly=%d rx=%d ry=%d l2=%d r2=%d cross=%d sq=%d tri=%d cir=%d l1=%d r1=%d start=%d share=%d\n",
-               gp.lx, gp.ly, gp.rx, gp.ry, gp.l2, gp.r2,
-               gp.btnCross, gp.btnSquare, gp.btnTriangle, gp.btnCircle,
-               gp.btnL1, gp.btnR1, gp.btnStart, gp.btnShare);
-    }
-
     gp.lx = ApplyDeadzoneVal(gp.lx, g_cfg.deadzoneLeft);
     gp.ly = ApplyDeadzoneVal(gp.ly, g_cfg.deadzoneLeft);
     gp.rx = ApplyDeadzoneVal(gp.rx, g_cfg.deadzoneRight);
     gp.ry = ApplyDeadzoneVal(gp.ry, g_cfg.deadzoneRight);
 
-    // ========================================================================
-    // GLOBAL BUTTON EDGES: START (OPTIONS) & SHARE / TOUCHPAD (MAP)
-    // ========================================================================
-    static BOOL s_lastStart = FALSE;
-    BOOL startEdge = (gp.btnStart && !s_lastStart);
-    s_lastStart = gp.btnStart;
+    // Tell engine that pad is active and touched
+    pad->LastTimeTouched = now;
 
+    // Log active gameplay input periodically
+    BOOL hasInput = (gp.lx != 0 || gp.ly != 0 || gp.rx != 0 || gp.ry != 0 ||
+                     gp.l2 > 30 || gp.r2 > 30 || gp.btnCross || gp.btnSquare ||
+                     gp.btnTriangle || gp.btnCircle || gp.btnL1 || gp.btnR1 ||
+                     gp.dpadUp || gp.dpadDown || gp.dpadLeft || gp.dpadRight ||
+                     gp.btnStart || gp.btnSelect || gp.btnPS);
+
+    if (hasInput && (now - g_lastInputLogTime > 2500)) {
+        g_lastInputLogTime = now;
+        LogMsg("[Pad0 Input] Active: LX=%d, LY=%d, RX=%d, RY=%d, L2=%d, R2=%d, X=%d, Sq=%d, Tri=%d, Cir=%d\n",
+               gp.lx, gp.ly, gp.rx, gp.ry, gp.l2, gp.r2,
+               gp.btnCross, gp.btnSquare, gp.btnTriangle, gp.btnCircle);
+    }
+
+    BYTE isMenuActive = *(BYTE*)ADDR_MENU_ACTIVE;
+    char curMenuPage = *(char*)ADDR_CURRENT_MENU_PAGE;
+
+    // GATILHOS ADAPTATIVOS DUALSENSE:
+    // Resistência no R2 ATIVA SOMENTE SE ESTIVER EMPUNHANDO UMA ARMA DE FOGO!
+    // Se estiver desarmado, socos, faca, veículos ou menus -> 100% livre e macio!
+    // L2 (MIRA): NUNCA TEM RESISTÊNCIA! 100% livre e macio!
+    g_triggerGunActive = (!isMenuActive && IsPlayerHoldingFirearm());
+
+    // SHARE / TOUCHPAD: Direct Map Shortcut
     static BOOL s_lastMapBtn = FALSE;
     BOOL mapBtn = (gp.btnShare || gp.btnTouch);
     BOOL mapEdge = (mapBtn && !s_lastMapBtn);
     s_lastMapBtn = mapBtn;
 
-    BYTE isMenuActive = *(BYTE*)ADDR_MENU_ACTIVE;
-    char curMenuPage = *(char*)ADDR_CURRENT_MENU_PAGE;
-
-    // 1. START / OPTIONS BUTTON: Toggles Pause / Settings Menu
-    if (startEdge) {
-        LogMsg("[Menu] Start/Options toggled! Current Active=%d\n", isMenuActive);
-        FUNC_SwitchMenuOnAndOff((void*)ADDR_FRONTEND_MENU_MANAGER);
-        return;
-    }
-
-    // 2. SHARE / TOUCHPAD: Direct Map Shortcut
     if (mapEdge) {
         LogMsg("[Menu] Share/Touchpad toggled! Active=%d, Page=%d\n", isMenuActive, curMenuPage);
         if (!isMenuActive) {
-            // Open menu directly into MAP page (5)
             FUNC_SwitchMenuOnAndOff((void*)ADDR_FRONTEND_MENU_MANAGER);
             FUNC_SwitchToNewScreen((void*)ADDR_FRONTEND_MENU_MANAGER, 5);
+            return;
         } else {
             if (curMenuPage == 5) {
-                // Already in Map -> exit straight to game
                 FUNC_SwitchMenuOnAndOff((void*)ADDR_FRONTEND_MENU_MANAGER);
             } else {
-                // In another menu -> switch to Map
                 FUNC_SwitchToNewScreen((void*)ADDR_FRONTEND_MENU_MANAGER, 5);
             }
+            return;
         }
-        return;
+    }
+
+    // MAP PAGE CONTROLS (Page 5)
+    if (isMenuActive && curMenuPage == 5) {
+        float* pMapX = (float*)ADDR_MAP_BASE_X;
+        float* pMapY = (float*)ADDR_MAP_BASE_Y;
+        if (pMapX && pMapY && (gp.lx != 0 || gp.ly != 0)) {
+            *pMapX += ((float)gp.lx / 128.0f) * 14.0f;
+            *pMapY += ((float)gp.ly / 128.0f) * 14.0f;
+        }
+        float* pZoom = (float*)ADDR_MAP_ZOOM;
+        if (pZoom) {
+            if (gp.r2 > 50 || gp.btnR1) *pZoom += 0.015f;
+            if (gp.l2 > 50 || gp.btnL1) *pZoom -= 0.015f;
+            if (*pZoom < 0.2f) *pZoom = 0.2f;
+            if (*pZoom > 8.0f) *pZoom = 8.0f;
+        }
     }
 
     // ========================================================================
-    // 3. FRONTEND / PAUSE MENU NAVIGATION (D-PAD, STICK, CROSS, CIRCLE)
+    // FRONTEND / MENU NAVIGATION
     // ========================================================================
     if (isMenuActive != 0) {
-        // Map Page (5) Controls: Left Stick pans map, R2/L2 or R1/L1 zooms map
-        if (curMenuPage == 5) {
-            float* pMapX = (float*)ADDR_MAP_BASE_X;
-            float* pMapY = (float*)ADDR_MAP_BASE_Y;
-            if (pMapX && pMapY && (gp.lx != 0 || gp.ly != 0)) {
-                *pMapX += ((float)gp.lx / 128.0f) * 14.0f;
-                *pMapY += ((float)gp.ly / 128.0f) * 14.0f;
-            }
-            float* pZoom = (float*)ADDR_MAP_ZOOM;
-            if (pZoom) {
-                if (gp.r2 > 50 || gp.btnR1) *pZoom += 0.015f;
-                if (gp.l2 > 50 || gp.btnL1) *pZoom -= 0.015f;
-                if (*pZoom < 0.2f) *pZoom = 0.2f;
-                if (*pZoom > 8.0f) *pZoom = 8.0f;
-            }
-        }
+        g_triggerGunActive = FALSE;
+        // Inversao corrigida para navegacao de menu: D-Pad Cima SOBE o cursor, D-Pad Baixo DESCE!
+        if (gp.dpadUp || gp.ly < -50)          pad->NewState.DPadDown = 255;
+        if (gp.dpadDown || gp.ly > 50)        pad->NewState.DPadUp = 255;
+        if (gp.dpadLeft || gp.lx < -50)       pad->NewState.DPadLeft = 255;
+        if (gp.dpadRight || gp.lx > 50)      pad->NewState.DPadRight = 255;
+        if (gp.btnCross)                      pad->NewState.ButtonCross = 255;
+        if (gp.btnTriangle || gp.btnCircle)   pad->NewState.ButtonTriangle = 255;
+        if (gp.btnStart)                      pad->NewState.Start = 255;
+        if (abs(gp.lx) > 8) pad->NewState.LeftStickX = gp.lx;
+        if (abs(gp.ly) > 8) pad->NewState.LeftStickY = -gp.ly;
 
-        // Navigation (D-Pad or Left Stick) with repeat timer
+        // Also trigger ProcessUserInput for instant responsive cursor/item navigation
         static DWORD s_nextNavRepeat = 0;
-        static int s_activeDir = 0; // 1=Up, 2=Down, 3=Left, 4=Right
+        static int s_activeDir = 0;
 
         int curDir = 0;
         if (gp.dpadUp || gp.ly < -60) curDir = 1;
@@ -699,19 +1044,18 @@ static void ProcessCustomController(CPad* pad) {
         else if (gp.dpadRight || gp.lx > 60) curDir = 4;
 
         char down = 0, up = 0, input = 0;
-
         if (curDir != 0) {
             if (curDir != s_activeDir) {
                 s_activeDir = curDir;
-                s_nextNavRepeat = now + 300; // 300ms initial delay
-                if (curDir == 1) up = 1;
-                else if (curDir == 2) down = 1;
+                s_nextNavRepeat = now + 300;
+                if (curDir == 1) down = 1;        // Invertido: curDir 1 (CIMA) move a selecao para CIMA!
+                else if (curDir == 2) up = 1;    // Invertido: curDir 2 (BAIXO) move a selecao para BAIXO!
                 else if (curDir == 3) input = -1;
                 else if (curDir == 4) input = 1;
             } else if (now >= s_nextNavRepeat) {
-                s_nextNavRepeat = now + 120; // 120ms repeat rate
-                if (curDir == 1) up = 1;
-                else if (curDir == 2) down = 1;
+                s_nextNavRepeat = now + 120;
+                if (curDir == 1) down = 1;
+                else if (curDir == 2) up = 1;
                 else if (curDir == 3) input = -1;
                 else if (curDir == 4) input = 1;
             }
@@ -719,20 +1063,11 @@ static void ProcessCustomController(CPad* pad) {
             s_activeDir = 0;
         }
 
-        // Buttons in Menu
         static BOOL s_lastCross = FALSE;
         static BOOL s_lastBack = FALSE;
-
-        char enter = 0;
-        if (gp.btnCross && !s_lastCross) {
-            enter = 1;
-        }
+        char enter = (gp.btnCross && !s_lastCross) ? 1 : 0;
+        char exit = ((gp.btnCircle || gp.btnTriangle) && !s_lastBack) ? 1 : 0;
         s_lastCross = gp.btnCross;
-
-        char exit = 0;
-        if ((gp.btnCircle || gp.btnTriangle) && !s_lastBack) {
-            exit = 1;
-        }
         s_lastBack = (gp.btnCircle || gp.btnTriangle);
 
         if (down || up || enter || exit || input) {
@@ -742,63 +1077,44 @@ static void ProcessCustomController(CPad* pad) {
         // Silence rumble while in menu
         g_targetLeftMotor = 0;
         g_targetRightMotor = 0;
-        g_lightbarRed = 160;
-        g_lightbarGreen = 30;
-        g_lightbarBlue = 255; // Violet in Menu
-        return; // End menu frame processing
-    }
-
-    // Update Lightbar based on CJ's Health in Gameplay
-    void** pPlayerPedPtr = (void**)0x00B7CD98;
-    if (pPlayerPedPtr && *pPlayerPedPtr) {
-        float hp = *(float*)((char*)(*pPlayerPedPtr) + 0x540);
-        if (hp <= 30.0f) {
-            g_lightbarRed = 255;
-            g_lightbarGreen = 0;
-            g_lightbarBlue = 0; // Red (Critical Health)
-        } else if (hp <= 60.0f) {
-            g_lightbarRed = 255;
-            g_lightbarGreen = 120;
-            g_lightbarBlue = 0; // Orange (Medium Health)
-        } else {
-            g_lightbarRed = 0;
-            g_lightbarGreen = 120;
-            g_lightbarBlue = 255; // PlayStation Blue (Healthy)
-        }
-    } else {
-        g_lightbarRed = 0;
-        g_lightbarGreen = 120;
-        g_lightbarBlue = 255;
+        return;
     }
 
     // ========================================================================
-    // 4. GAMEPLAY CONTROLS (ON FOOT & IN VEHICLE)
+    // GAMEPLAY CONTROLS (ON FOOT & IN VEHICLE)
+    // NOTE: We do NOT wipe NewState with memset, so Keyboard and Controller
+    // work together seamlessly at the same time!
     // ========================================================================
-    BOOL hasInput = (gp.lx != 0 || gp.ly != 0 || gp.rx != 0 || gp.ry != 0 ||
-                     gp.l2 > 30 || gp.r2 > 30 || gp.btnCross || gp.btnSquare ||
-                     gp.btnTriangle || gp.btnCircle || gp.btnL1 || gp.btnR1 ||
-                     gp.dpadUp || gp.dpadDown || gp.dpadLeft || gp.dpadRight ||
-                     gp.btnStart || gp.btnSelect || gp.btnPS);
+    
+    // 1. Inicializa os icones de botoes PS5 a partir de models\ps3btns.txd
+    InitPS5Buttons();
 
-    if (hasInput && (now - g_lastInputLogTime > 3000)) {
-        g_lastInputLogTime = now;
-        LogMsg("[Pad0] Active Gameplay Input: LX=%d, LY=%d, RX=%d, RY=%d, L2=%d, R2=%d\n",
-               gp.lx, gp.ly, gp.rx, gp.ry, gp.l2, gp.r2);
-    }
+    // 2. Garante que todas as 80 armas tenham bMoveAim e bMoveFire (andar e esquivar mirando/atirando)
+    EnsureMoveWhileAiming();
+
+    // 3. Ativa modo Joypad do console para habilitar mira automatica (Auto-Aim / Lock-On)
+    *(BYTE*)0x00B6EC2E = 1;            // m_bJoypadControls = 1 (ativa CPlayerPed::FindWeaponTargetJoypad)
+    pad->Mode = 1;                     // Joypad mode no CPad
+    *(BYTE*)(0x00BA6748 + 0xD0) = 0;   // CMenuManager: 0 = Joypad
 
     void* pVeh = FUNC_FindPlayerVehicle(-1, FALSE);
     BOOL isVehicle = (pVeh != NULL);
 
-    // Clear entire NewState so CPad::Update's leftover data doesn't bleed through
-    memset(&pad->NewState, 0, sizeof(CControllerState));
+    // ANALOG STICK MOVEMENT (Left Stick)
+    // Se o controle for movido alem da deadzone, aplica a direcao do controle.
+    // Se estiver neutro, mantem o teclado (WASD / setas) intacto!
+    if (abs(gp.lx) > 8) {
+        pad->NewState.LeftStickX = gp.lx;
+    }
+    if (abs(gp.ly) > 8) {
+        pad->NewState.LeftStickY = gp.ly;
+    }
 
-    // ANALOG STICK MOVEMENT (Left Stick ONLY)
-    // CRITICAL: D-Pad NEVER moves CJ on foot!
-    pad->NewState.LeftStickX = gp.lx;
-    pad->NewState.LeftStickY = gp.ly;
-
-    // ANALOG CAMERA LOOK (Right Stick -> Mouse Deltas)
+    // ANALOG CAMERA LOOK & TARGET SWITCHING (Right Stick -> Mouse Deltas & Pad Stick)
     if (gp.rx != 0 || gp.ry != 0) {
+        pad->NewState.RightStickX = gp.rx;
+        pad->NewState.RightStickY = gp.ry;
+
         CMouseControllerState* mouseState = (CMouseControllerState*)ADDR_MOUSE_STATE;
         if (mouseState) {
             BOOL bGameInvert = (*(BYTE*)ADDR_GAME_INVERTMOUSE_Y != 0) || 
@@ -812,16 +1128,19 @@ static void ProcessCustomController(CPad* pad) {
         }
     }
 
+    // PAUSE MENU (Start / Options)
+    if (gp.btnStart) {
+        pad->NewState.Start = 255;
+    }
+
     // CAMERA VIEW CHANGE (PS Logo Button)
     if (gp.btnPS) {
         pad->NewState.Select = 255;
     }
 
     if (!isVehicle) {
-        // ==========================================
         // A PÉ (ON FOOT)
-        // ==========================================
-        // L2: MIRA (Target Lock-on / Free Aim) -> RightShoulder1
+        // L2: MIRA (Target Lock-on / Free Aim) -> RightShoulder1 (SEM resistência no gatilho!)
         if (gp.l2 > 30) {
             pad->NewState.RightShoulder1 = 255;
         }
@@ -831,14 +1150,19 @@ static void ProcessCustomController(CPad* pad) {
             pad->NewState.ButtonCircle = 255;
         }
 
-        // BOTÕES DE FACE
+        // BOTÕES DE FACE (Preserva teclado se pressionado)
         if (gp.btnCross)    pad->NewState.ButtonCross    = 255; // Correr / Sprint
         if (gp.btnSquare)   pad->NewState.ButtonSquare   = 255; // Pulo / Escalar
         if (gp.btnTriangle) pad->NewState.ButtonTriangle = 255; // Entrar no veículo
         if (gp.btnCircle && gp.r2 <= 30) pad->NewState.ButtonCircle = 255; // Soco / Combate corpo a corpo
 
-        // TROCA DE ARMA RÁPIDA (CYCLE WEAPONS)
-        // EXCLUSIVAMENTE L1 E R1! (DPAD NÃO TROCA ARMA!)
+        // D-PAD
+        if (gp.dpadUp)    pad->NewState.DPadUp    = 255;
+        if (gp.dpadDown)  pad->NewState.DPadDown  = 255;
+        if (gp.dpadLeft)  pad->NewState.DPadLeft  = 255;
+        if (gp.dpadRight) pad->NewState.DPadRight = 255;
+
+        // TROCA DE ARMA RÁPIDA (L1 e R1)
         if (gp.btnL1) {
             pad->NewState.LeftShoulder2 = 255;  // Ciclo arma anterior
         }
@@ -846,22 +1170,35 @@ static void ProcessCustomController(CPad* pad) {
             pad->NewState.RightShoulder2 = 255; // Ciclo arma seguinte
         }
 
-
         // ANALÓGICOS PRESSIONADOS
         if (gp.btnL3) pad->NewState.ShockButtonL = 255; // Agachar (Duck)
         if (gp.btnR3) pad->NewState.ShockButtonR = 255; // Olhar para trás
 
     } else {
-        // ==========================================
         // EM VEÍCULO (IN VEHICLE)
-        // ==========================================
-        if (gp.r2 > 30) {
-            pad->NewState.ButtonCross = 255;    // Acelerar
+        // ACELERAÇÃO PROGRESSIVA ANALÓGICA COM R2:
+        // Pressionar leve = velocidade baixa / cruzeiro.
+        // Pressionar tudo = aceleração máxima!
+        if (gp.r2 > 15) {
+            short accel = (short)(((int)(gp.r2 - 15) * 255) / (255 - 15));
+            if (accel > 255) accel = 255;
+            if (accel > pad->NewState.ButtonCross) {
+                pad->NewState.ButtonCross = accel;
+            }
         }
-        if (gp.l2 > 30) {
-            pad->NewState.ButtonSquare = 255;   // Frear / Ré
+
+        // FREIO E RÉ PROGRESSIVOS ANALÓGICOS COM L2:
+        // Pressionar leve = frenagem suave.
+        // Pressionar tudo = frenagem total / ré rápida!
+        if (gp.l2 > 15) {
+            short brake = (short)(((int)(gp.l2 - 15) * 255) / (255 - 15));
+            if (brake > 255) brake = 255;
+            if (brake > pad->NewState.ButtonSquare) {
+                pad->NewState.ButtonSquare = brake;
+            }
         }
-        if (gp.btnR1 || gp.btnCross) {
+
+        if (gp.btnR1) {
             pad->NewState.RightShoulder1 = 255; // Freio de mão
         }
         if (gp.btnCircle) {
@@ -879,7 +1216,6 @@ static void ProcessCustomController(CPad* pad) {
         if (gp.btnR3) {
             pad->NewState.ShockButtonR = 255;   // Missão veículo
         }
-        // D-PAD: SOMENTE NO MENU — nenhuma ação em veículo
     }
 
     // ========================================================================
@@ -929,13 +1265,13 @@ static void ProcessCustomController(CPad* pad) {
 
 // ============================================================================
 // Hook: CALL-site patch at CPad::Update(pad0) call in UpdatePads
-// Strategy: hook the CALL instruction at 0x0054120B (pad0) in UpdatePads
+// Strategy: hook the CALL instruction at 0x00541E0B (pad0) in UpdatePads
 // Our function gets: ecx=thisPad (thiscall), [esp+4]=padNum
 // Then we call the original function directly (its entry is untouched)
 // ============================================================================
 
-#define ADDR_HOOK_PAD0      0x0054120B  // call CPad::Update (pad0, ecx=0xB73458)
-#define FUNC_CPAD_UPDATE    0x00541040  // original CPad::Update function entry
+#define ADDR_HOOK_PAD0      0x00541E0B  // call CPad::Update (pad0, ecx=0xB73458) in UpdatePads
+#define FUNC_CPAD_UPDATE    0x00541C40  // original CPad::Update function entry (v1.0 US)
 
 static BYTE g_origPad0[5];
 
@@ -944,6 +1280,12 @@ typedef void (__attribute__((thiscall)) *tCPadUpdate)(void* thisPad, int padNum)
 // Replacement for the CALL to CPad::Update(pad0)
 // Called with thiscall convention: ecx=thisPad, [esp+4]=padNum
 static void __attribute__((thiscall)) Hooked_CPadUpdate0(void* thisPad, int padNum) {
+    static BOOL s_hookAnnounced = FALSE;
+    if (!s_hookAnnounced) {
+        s_hookAnnounced = TRUE;
+        LogMsg("[Hook] CPad::Update(padNum=%d) ACTIVELY CALLED BY GTA ENGINE! Hook is alive!\n", padNum);
+    }
+
     // Call original CPad::Update (its entry is untouched, we only patched the CALL site)
     ((tCPadUpdate)FUNC_CPAD_UPDATE)(thisPad, padNum);
 
@@ -955,6 +1297,8 @@ static void __attribute__((thiscall)) Hooked_CPadUpdate0(void* thisPad, int padN
 
 static void InstallHook(void) {
     DWORD oldProtect;
+    
+    // 1. Hook CALL em CPad::Update (pad 0)
     if (VirtualProtect((LPVOID)ADDR_HOOK_PAD0, 5, PAGE_EXECUTE_READWRITE, &oldProtect)) {
         memcpy(g_origPad0, (void*)ADDR_HOOK_PAD0, 5);
         DWORD myAddr = (DWORD)Hooked_CPadUpdate0;
@@ -976,14 +1320,15 @@ BOOL WINAPI DllMain(HINSTANCE hinstDLL, DWORD fdwReason, LPVOID lpvReserved) {
     if (fdwReason == DLL_PROCESS_ATTACH) {
         DisableThreadLibraryCalls(hinstDLL);
         LogMsg("====================================================\n");
-        LogMsg(" Universal Controller Mod v2.2.0 (DualSense Master + Menu Engine)\n");
+        LogMsg(" Universal Controller Mod v2.6.0 (DualSense & DualShock 4 Engine Direct)\n");
+        LogMsg(" PS5 Icons + Auto-Aim Lock-On + Move While Aiming\n");
         LogMsg(" Built exclusively for GTA San Andreas\n");
         LogMsg("====================================================\n");
         LoadConfig();
         // Start DualSense HID thread immediately on DLL load (not lazy)
         LogMsg("[Init] Starting DualSense HID worker thread...\n");
         CreateThread(NULL, 0, DualSenseWorkerThread, NULL, 0, NULL);
-        // Install game hook
+        // Install game hooks
         InstallHook();
     } else if (fdwReason == DLL_PROCESS_DETACH) {
         g_dsRunning = FALSE;
