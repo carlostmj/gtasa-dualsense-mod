@@ -113,7 +113,7 @@ typedef void (__attribute__((thiscall)) *tSwitchMenuOnAndOff)(void* thisMgr);
 typedef char (__attribute__((thiscall)) *tSwitchToNewScreen)(void* thisMgr, char page);
 #define FUNC_SwitchToNewScreen ((tSwitchToNewScreen)0x00573680)
 
-typedef void (__attribute__((thiscall)) *tProcessUserInput)(void* thisMgr, char down, char up, char enter, char exit, char input);
+typedef void (__attribute__((thiscall)) *tProcessUserInput)(void* thisMgr, char up, char down, char enter, char exit, char input);
 #define FUNC_ProcessUserInput ((tProcessUserInput)0x0057B480)
 
 static void LogMsg(const char* fmt, ...);
@@ -780,10 +780,16 @@ static DWORD WINAPI DualSenseWorkerThread(LPVOID lpParam) {
                     g_dsInput.btnTriangle = (b0 & 0x80) != 0;
 
                     BYTE dpad = b0 & 0x0F;
-                    g_dsInput.dpadUp    = (dpad == 0 || dpad == 1 || dpad == 7);
-                    g_dsInput.dpadRight = (dpad == 1 || dpad == 2 || dpad == 3);
-                    g_dsInput.dpadDown  = (dpad == 3 || dpad == 4 || dpad == 5);
-                    g_dsInput.dpadLeft  = (dpad == 5 || dpad == 6 || dpad == 7);
+                    if (dpad == 8 || b0 == 0) {
+                        g_dsInput.dpadUp = g_dsInput.dpadRight = g_dsInput.dpadDown = g_dsInput.dpadLeft = FALSE;
+                    } else if (dpad <= 7) {
+                        g_dsInput.dpadUp    = (dpad == 0 || dpad == 1 || dpad == 7);
+                        g_dsInput.dpadRight = (dpad == 1 || dpad == 2 || dpad == 3);
+                        g_dsInput.dpadDown  = (dpad == 3 || dpad == 4 || dpad == 5);
+                        g_dsInput.dpadLeft  = (dpad == 5 || dpad == 6 || dpad == 7);
+                    } else {
+                        g_dsInput.dpadUp = g_dsInput.dpadRight = g_dsInput.dpadDown = g_dsInput.dpadLeft = FALSE;
+                    }
 
                     BYTE b1 = buf[8];
                     g_dsInput.btnL1     = (b1 & 0x01) != 0;
@@ -820,10 +826,16 @@ static DWORD WINAPI DualSenseWorkerThread(LPVOID lpParam) {
                     g_dsInput.btnTriangle = (b0 & 0x80) != 0;
 
                     BYTE dpad = b0 & 0x0F;
-                    g_dsInput.dpadUp    = (dpad == 0 || dpad == 1 || dpad == 7);
-                    g_dsInput.dpadRight = (dpad == 1 || dpad == 2 || dpad == 3);
-                    g_dsInput.dpadDown  = (dpad == 3 || dpad == 4 || dpad == 5);
-                    g_dsInput.dpadLeft  = (dpad == 5 || dpad == 6 || dpad == 7);
+                    if (dpad == 8 || b0 == 0) {
+                        g_dsInput.dpadUp = g_dsInput.dpadRight = g_dsInput.dpadDown = g_dsInput.dpadLeft = FALSE;
+                    } else if (dpad <= 7) {
+                        g_dsInput.dpadUp    = (dpad == 0 || dpad == 1 || dpad == 7);
+                        g_dsInput.dpadRight = (dpad == 1 || dpad == 2 || dpad == 3);
+                        g_dsInput.dpadDown  = (dpad == 3 || dpad == 4 || dpad == 5);
+                        g_dsInput.dpadLeft  = (dpad == 5 || dpad == 6 || dpad == 7);
+                    } else {
+                        g_dsInput.dpadUp = g_dsInput.dpadRight = g_dsInput.dpadDown = g_dsInput.dpadLeft = FALSE;
+                    }
 
                     BYTE b1 = buf[base + 5];
                     g_dsInput.btnL1     = (b1 & 0x01) != 0;
@@ -864,10 +876,16 @@ static DWORD WINAPI DualSenseWorkerThread(LPVOID lpParam) {
                 g_dsInput.btnTriangle = (b0 & 0x80) != 0;
 
                 BYTE dpad = b0 & 0x0F;
-                g_dsInput.dpadUp    = (dpad == 0 || dpad == 1 || dpad == 7);
-                g_dsInput.dpadRight = (dpad == 1 || dpad == 2 || dpad == 3);
-                g_dsInput.dpadDown  = (dpad == 3 || dpad == 4 || dpad == 5);
-                g_dsInput.dpadLeft  = (dpad == 5 || dpad == 6 || dpad == 7);
+                if (dpad == 8 || b0 == 0) {
+                    g_dsInput.dpadUp = g_dsInput.dpadRight = g_dsInput.dpadDown = g_dsInput.dpadLeft = FALSE;
+                } else if (dpad <= 7) {
+                    g_dsInput.dpadUp    = (dpad == 0 || dpad == 1 || dpad == 7);
+                    g_dsInput.dpadRight = (dpad == 1 || dpad == 2 || dpad == 3);
+                    g_dsInput.dpadDown  = (dpad == 3 || dpad == 4 || dpad == 5);
+                    g_dsInput.dpadLeft  = (dpad == 5 || dpad == 6 || dpad == 7);
+                } else {
+                    g_dsInput.dpadUp = g_dsInput.dpadRight = g_dsInput.dpadDown = g_dsInput.dpadLeft = FALSE;
+                }
 
                 BYTE b1 = buf[base + 8];
                 g_dsInput.btnL1     = (b1 & 0x01) != 0;
@@ -1272,21 +1290,23 @@ static void ProcessCustomController(CPad* pad) {
         static DWORD s_nextNavRepeat = 0;
         static int s_activeDir = 0;
 
+        // No Menu: navegação EXCLUSIVA por D-Pad (o analógico NUNCA move menus no GTA SA original)
+        // Isso elimina 100% qualquer chance de drift do analógico rolar o menu sozinho!
         int curDir = 0;
-        if (gp.dpadUp || gp.ly < -60) curDir = 1;       // CIMA
-        else if (gp.dpadDown || gp.ly > 60) curDir = 2; // BAIXO
-        else if (gp.dpadLeft || gp.lx < -60) curDir = 3;// ESQUERDA
-        else if (gp.dpadRight || gp.lx > 60) curDir = 4;// DIREITA
+        if (gp.dpadUp) curDir = 1;       // CIMA
+        else if (gp.dpadDown) curDir = 2; // BAIXO
+        else if (gp.dpadLeft) curDir = 3; // ESQUERDA
+        else if (gp.dpadRight) curDir = 4;// DIREITA
 
-        char down = 0, up = 0, input = 0;
+        char up = 0, down = 0, input = 0;
         if (curDir != 0) {
             if (curDir != s_activeDir) {
                 s_activeDir = curDir;
                 s_nextNavRepeat = now + 350;     // Delay inicial de 350ms para evitar pulo acidental
-                if (curDir == 1) up = 1;         // CIMA -> decrementa índice (sobe 1 item)
-                else if (curDir == 2) down = 1;  // BAIXO -> incrementa índice (desce 1 item)
-                else if (curDir == 3) input = -1;// ESQUERDA -> slider / opção anterior
-                else if (curDir == 4) input = 1; // DIREITA -> slider / próxima opção
+                if (curDir == 1) up = 1;         // CIMA -> sobe 1 item
+                else if (curDir == 2) down = 1;  // BAIXO -> desce 1 item
+                else if (curDir == 3) input = -1;// ESQUERDA -> slider anterior
+                else if (curDir == 4) input = 1; // DIREITA -> próximo slider
             } else if (now >= s_nextNavRepeat) {
                 s_nextNavRepeat = now + 160;     // Taxa de repetição contínua (160ms) ao segurar
                 if (curDir == 1) up = 1;
@@ -1305,8 +1325,9 @@ static void ProcessCustomController(CPad* pad) {
         s_lastCross = gp.btnCross;
         s_lastBack = (gp.btnCircle || gp.btnTriangle);
 
-        if (down || up || enter || exit || input) {
-            FUNC_ProcessUserInput((void*)ADDR_FRONTEND_MENU_MANAGER, down, up, enter, exit, input);
+        // Ordem oficial da engine do GTA SA: (manager, up, down, enter, exit, input)
+        if (up || down || enter || exit || input) {
+            FUNC_ProcessUserInput((void*)ADDR_FRONTEND_MENU_MANAGER, up, down, enter, exit, input);
         }
 
         // Silence rumble while in menu
