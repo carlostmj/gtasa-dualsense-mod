@@ -1057,34 +1057,55 @@ static BOOL PollDirectInput(DualSenseInputState* outState) {
             short rx = (short)(((int)jie.dwZpos - 32768) / 256);
             short ry = (short)(((int)jie.dwRpos - 32768) / 256);
 
-            // Filter phantom zeroed devices
-            if (jie.dwButtons == 0 && abs(lx) < 2 && abs(ly) < 2 && abs(rx) < 2 && abs(ry) < 2 && jie.dwPOV == 0xFFFF) {
-                continue;
-            }
-
             outState->connected = TRUE;
             outState->lx = lx;
             outState->ly = ly;
             outState->rx = rx;
             outState->ry = ry;
-            outState->l2 = (BYTE)(jie.dwUpos / 257);
-            outState->r2 = (BYTE)(jie.dwVpos / 257);
-            outState->btnCross    = (jie.dwButtons & (1 << 0)) != 0;
-            outState->btnCircle   = (jie.dwButtons & (1 << 1)) != 0;
-            outState->btnSquare   = (jie.dwButtons & (1 << 2)) != 0;
-            outState->btnTriangle = (jie.dwButtons & (1 << 3)) != 0;
-            outState->btnL1       = (jie.dwButtons & (1 << 4)) != 0;
-            outState->btnR1       = (jie.dwButtons & (1 << 5)) != 0;
-            outState->btnShare    = (jie.dwButtons & (1 << 8)) != 0;
-            outState->btnStart    = (jie.dwButtons & (1 << 9)) != 0;
-            outState->btnL3       = (jie.dwButtons & (1 << 10)) != 0;
-            outState->btnR3       = (jie.dwButtons & (1 << 11)) != 0;
-            outState->btnSelect   = outState->btnShare;
-            if (jie.dwPOV != 0xFFFF) {
+
+            // Calibração perfeita de L2 e R2 analógicos no DirectInput do Windows
+            BYTE l2 = 0;
+            if (jie.dwUpos > 33000) {
+                l2 = (BYTE)(((jie.dwUpos - 32768) * 255) / 32767);
+            } else if (jie.dwButtons & (1 << 6)) {
+                l2 = 255;
+            }
+            outState->l2 = l2;
+
+            BYTE r2 = 0;
+            if (jie.dwVpos > 33000) {
+                r2 = (BYTE)(((jie.dwVpos - 32768) * 255) / 32767);
+            } else if (jie.dwButtons & (1 << 7)) {
+                r2 = 255;
+            }
+            outState->r2 = r2;
+
+            // Mapeamento 100% oficial e preciso do DualSense / DualShock no Windows
+            outState->btnCross    = (jie.dwButtons & (1 << 0)) != 0; // X
+            outState->btnCircle   = (jie.dwButtons & (1 << 1)) != 0; // Círculo (Soco)
+            outState->btnSquare   = (jie.dwButtons & (1 << 2)) != 0; // Quadrado (Pulo)
+            outState->btnTriangle = (jie.dwButtons & (1 << 3)) != 0; // Triângulo (Entrar/Sair)
+            outState->btnL1       = (jie.dwButtons & (1 << 4)) != 0; // L1 (Troca arma ant.)
+            outState->btnR1       = (jie.dwButtons & (1 << 5)) != 0; // R1 (Troca arma seg.)
+            outState->btnShare    = (jie.dwButtons & (1 << 8)) != 0; // Create / Share
+            outState->btnStart    = (jie.dwButtons & (1 << 9)) != 0; // Options / Start / Play
+            outState->btnL3       = (jie.dwButtons & (1 << 10)) != 0;// L3 (Agachar)
+            outState->btnR3       = (jie.dwButtons & (1 << 11)) != 0;// R3 (Olhar trás)
+            outState->btnPS       = (jie.dwButtons & (1 << 12)) != 0;// Botão PS
+            outState->btnTouch    = (jie.dwButtons & (1 << 13)) != 0;// Touchpad Click
+            outState->btnSelect   = outState->btnShare || outState->btnTouch;
+
+            // D-Pad do Windows POV Hat (65535 = Nenhum direcional pressionado)
+            if (jie.dwPOV != 0xFFFF && jie.dwPOV <= 35900) {
                 outState->dpadUp    = (jie.dwPOV == 0    || jie.dwPOV == 4500  || jie.dwPOV == 31500);
                 outState->dpadRight = (jie.dwPOV == 4500 || jie.dwPOV == 9000  || jie.dwPOV == 13500);
                 outState->dpadDown  = (jie.dwPOV == 13500|| jie.dwPOV == 18000 || jie.dwPOV == 22500);
                 outState->dpadLeft  = (jie.dwPOV == 22500|| jie.dwPOV == 27000 || jie.dwPOV == 31500);
+            } else {
+                outState->dpadUp = FALSE;
+                outState->dpadRight = FALSE;
+                outState->dpadDown = FALSE;
+                outState->dpadLeft = FALSE;
             }
             return TRUE;
         }
@@ -1147,20 +1168,35 @@ static void ProcessCustomController(CPad* pad) {
     DualSenseInputState gp = { 0 };
 
     // Multi-tier Universal Detection:
-    // 1. Native Sony HID (DualSense PS5, DualShock 4)
-    if (g_dsInput.connected) {
-        gp = g_dsInput;
+    // 1. DirectInput / WinMM (Método padrão, 100% calibrado pelo Windows para botões e analógicos)
+    if (PollDirectInput(&gp)) {
+        // Sobrepõe dados avançados do giroscópio e gatilhos do DualSense se disponíveis
+        if (g_dsInput.connected) {
+            gp.gyroX = g_dsInput.gyroX;
+            gp.gyroY = g_dsInput.gyroY;
+            gp.gyroZ = g_dsInput.gyroZ;
+            gp.accelX = g_dsInput.accelX;
+            gp.accelY = g_dsInput.accelY;
+            gp.accelZ = g_dsInput.accelZ;
+            if (g_dsInput.touchActive) {
+                gp.touchActive = TRUE;
+                gp.touchX = g_dsInput.touchX;
+                gp.touchY = g_dsInput.touchY;
+            }
+            if (g_dsInput.l2 > gp.l2 && g_dsInput.l2 > 25) gp.l2 = g_dsInput.l2;
+            if (g_dsInput.r2 > gp.r2 && g_dsInput.r2 > 25) gp.r2 = g_dsInput.r2;
+        }
     }
     // 2. XInput (Xbox, DS4Windows, Steam Input, DualSenseX)
     else if (PollXInput(&gp)) {
         // Active via XInput
     }
-    // 3. DirectInput (Generic USB gamepads)
-    else if (PollDirectInput(&gp)) {
-        // Active via DirectInput
+    // 3. Fallback para HID puro
+    else if (g_dsInput.connected) {
+        gp = g_dsInput;
     }
     else {
-        return; // No controller connected
+        return; // Nenhum controle conectado
     }
 
     DWORD now = GetTickCount();
@@ -1672,18 +1708,14 @@ static void ProcessCustomController(CPad* pad) {
         if (gp.dpadRight) pad->NewState.DPadRight = 255;
 
         // ====================================================================
-        // TROCA DE ARMA RÁPIDA E NATIVA (L1 e R1) - 1 TOQUE = 1 ARMA
+        // TROCA DE ARMA RÁPIDA (L1 e R1)
         // ====================================================================
-        static BOOL s_lastL1 = FALSE;
-        static BOOL s_lastR1 = FALSE;
-        if (gp.btnL1 && !s_lastL1) {
+        if (gp.btnL1) {
             pad->NewState.LeftShoulder2 = 255;  // Ciclo arma anterior
         }
-        if (gp.btnR1 && !s_lastR1) {
+        if (gp.btnR1) {
             pad->NewState.RightShoulder2 = 255; // Ciclo arma seguinte
         }
-        s_lastL1 = gp.btnL1;
-        s_lastR1 = gp.btnR1;
 
         // ANALÓGICOS PRESSIONADOS
         if (gp.btnL3) pad->NewState.ShockButtonL = 255; // Agachar (Duck)
