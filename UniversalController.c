@@ -512,37 +512,43 @@ static volatile BYTE g_lastSentRed = 0xFF;
 static volatile BYTE g_lastSentGreen = 0xFF;
 static volatile BYTE g_lastSentBlue = 0xFF;
 
+static volatile BOOL g_dsNeedsLedReset = TRUE;
+
 static void SendDualSenseHardwareReport(HANDLE hDev, BYTE leftMotor, BYTE rightMotor) {
     DWORD now = GetTickCount();
     if (g_sonyDevType == SONY_DEV_DUALSENSE) {
         if (!g_sonyIsBluetooth) {
             // ================================================================
             // DUALSENSE USB MODE (Report ID 0x02)
-            // Windows HID requires the buffer to match caps.OutputReportByteLength (e.g. 547)
-            // or 64 bytes depending on the driver. We allocate 548 bytes safely!
             // ================================================================
             BYTE report[548];
             memset(report, 0, sizeof(report));
 
             report[0] = 0x02; // Report ID
-            report[1] = 0xFF; // valid_flag0 (compatible rumble + haptics + triggers)
-            report[2] = 0xF7; // valid_flag1 (0x04=lightbar enable, 0x10=player led enable, etc.)
+            report[1] = 0x03; // valid_flag0 (compatible rumble + haptics select)
+            report[2] = 0x14; // valid_flag1 (0x04=lightbar enable, 0x10=player led enable)
             report[3] = rightMotor; // High-frequency weak rumble (0-255)
             report[4] = leftMotor;  // Low-frequency strong rumble (0-255)
 
             // R2 (Right Trigger):
-            report[11] = g_triggerR2Mode;
-            report[12] = g_triggerR2Param1;
-            report[13] = g_triggerR2Param2;
+            if (g_triggerR2Mode != 0) {
+                report[1] |= 0x04;
+                report[11] = g_triggerR2Mode;
+                report[12] = g_triggerR2Param1;
+                report[13] = g_triggerR2Param2;
+            }
 
             // L2 (Left Trigger):
-            report[22] = g_triggerL2Mode;
-            report[23] = g_triggerL2Param1;
-            report[24] = g_triggerL2Param2;
+            if (g_triggerL2Mode != 0) {
+                report[1] |= 0x08;
+                report[22] = g_triggerL2Mode;
+                report[23] = g_triggerL2Param1;
+                report[24] = g_triggerL2Param2;
+            }
 
             // Lightbar & LEDs:
-            report[39] = 0x02; // valid_flag2 (0x02 = lightbar setup control enable)
-            report[42] = 0x00; // lightbar_setup (0 = normal light, 2 = lights out)
+            report[39] = 0x00; // valid_flag2 (0x00 so lightbar is never disabled)
+            report[42] = 0x00; // lightbar_setup
             report[43] = 0x00; // Brightness High
             report[44] = 0x04; // Player 1 LED
             report[45] = g_lightbarRed;
@@ -571,43 +577,60 @@ static void SendDualSenseHardwareReport(HANDLE hDev, BYTE leftMotor, BYTE rightM
             static DWORD s_lastReportLog = 0;
             if (now - s_lastReportLog > 3000) {
                 s_lastReportLog = now;
-                LogMsg("[SonyHID] Output Report USB: ok=%d, written=%u, RGB=(%u,%u,%u), R2Mode=0x%02X, L2Mode=0x%02X, targetLen=%u, LastErr=%u\n",
-                       ok, written, g_lightbarRed, g_lightbarGreen, g_lightbarBlue, g_triggerR2Mode, g_triggerL2Mode, targetLen, GetLastError());
+                LogMsg("[SonyHID] Output Report USB: ok=%d, written=%u, RGB=(%u,%u,%u), R2Mode=0x%02X, L2Mode=0x%02X, targetLen=%u\n",
+                       ok, written, g_lightbarRed, g_lightbarGreen, g_lightbarBlue, g_triggerR2Mode, g_triggerL2Mode, targetLen);
             }
         } else {
             // ================================================================
-            // DUALSENSE BLUETOOTH MODE (Report ID 0x31, 78 bytes with CRC)
-            // Linux kernel hid-playstation standard layout
+            // DUALSENSE BLUETOOTH MODE (Report ID 0x31)
+            // Linux kernel hid-playstation & SDL official specification
             // ================================================================
-            BYTE report[78];
+            static BYTE s_btSeq = 0;
+            s_btSeq = (s_btSeq + 1) & 0x0F;
+
+            BYTE report[548];
             memset(report, 0, sizeof(report));
 
             report[0] = 0x31; // Report ID
-            report[1] = 0x02; // seq_tag
+            report[1] = (BYTE)(s_btSeq << 4); // 4-bit sequence counter (mandatory for DualSense BT!)
             report[2] = 0x10; // tag (DS_OUTPUT_TAG = 0x10 mandatory for BT!)
-            report[3] = 0xFF; // valid_flag0
-            report[4] = 0xF7; // valid_flag1 (0x04 = lightbar enable)
-            report[5] = rightMotor; // High-frequency weak rumble
-            report[6] = leftMotor;  // Low-frequency strong rumble
 
-            // R2 (Right Trigger):
-            report[13] = g_triggerR2Mode;
-            report[14] = g_triggerR2Param1;
-            report[15] = g_triggerR2Param2;
+            if (g_dsNeedsLedReset) {
+                // Initial one-time LED state reset so firmware accepts custom RGB
+                g_dsNeedsLedReset = FALSE;
+                report[3] = 0x00;
+                report[4] = 0x08; // Reset LED state (k_EDS5EffectLEDReset)
+            } else {
+                report[3] = 0x03; // valid_flag0 (compatible rumble + haptics select)
+                report[4] = 0x14; // valid_flag1 (0x04=lightbar enable, 0x10=player led enable - NO 0x08!)
+                report[5] = rightMotor; // High-frequency weak rumble
+                report[6] = leftMotor;  // Low-frequency strong rumble
 
-            // L2 (Left Trigger):
-            report[24] = g_triggerL2Mode;
-            report[25] = g_triggerL2Param1;
-            report[26] = g_triggerL2Param2;
+                // R2 (Right Trigger):
+                if (g_triggerR2Mode != 0) {
+                    report[3] |= 0x04;
+                    report[13] = g_triggerR2Mode;
+                    report[14] = g_triggerR2Param1;
+                    report[15] = g_triggerR2Param2;
+                }
 
-            // Lightbar & LEDs:
-            report[41] = 0x02; // valid_flag2
-            report[44] = 0x00; // lightbar_setup
-            report[45] = 0x00; // Brightness High
-            report[46] = 0x04; // Player 1 LED
-            report[47] = g_lightbarRed;
-            report[48] = g_lightbarGreen;
-            report[49] = g_lightbarBlue;
+                // L2 (Left Trigger):
+                if (g_triggerL2Mode != 0) {
+                    report[3] |= 0x08;
+                    report[24] = g_triggerL2Mode;
+                    report[25] = g_triggerL2Param1;
+                    report[26] = g_triggerL2Param2;
+                }
+
+                // Lightbar & LEDs:
+                report[41] = 0x00; // valid_flag2 (0x00 so lightbar is never disabled)
+                report[44] = 0x00; // lightbar_setup
+                report[45] = 0x00; // Brightness High
+                report[46] = 0x04; // Player 1 LED
+                report[47] = g_lightbarRed;
+                report[48] = g_lightbarGreen;
+                report[49] = g_lightbarBlue;
+            }
 
             // CRC32 of 0xA2 + report[0..73]
             BYTE crcBuf[75];
@@ -620,20 +643,29 @@ static void SendDualSenseHardwareReport(HANDLE hDev, BYTE leftMotor, BYTE rightM
             report[76] = (BYTE)((crc >> 16) & 0xFF);
             report[77] = (BYTE)((crc >> 24) & 0xFF);
 
+            DWORD targetLen = (g_outputReportLength >= 78 && g_outputReportLength <= 548) ? g_outputReportLength : 547;
             DWORD written = 0;
-            BOOL ok = WriteFile(hDev, report, 78, &written, NULL);
+            BOOL ok = WriteFile(hDev, report, targetLen, &written, NULL);
+            if (!ok && targetLen != 78) {
+                ok = WriteFile(hDev, report, 78, &written, NULL);
+                if (ok) targetLen = 78;
+            }
             if (!ok) {
+                ok = HidD_SetOutputReport(hDev, report, targetLen);
+            }
+            if (!ok && targetLen != 78) {
                 ok = HidD_SetOutputReport(hDev, report, 78);
+                if (ok) targetLen = 78;
             }
 
             static DWORD s_lastBtLog = 0;
             if (now - s_lastBtLog > 3000) {
                 s_lastBtLog = now;
-                LogMsg("[SonyHID] Output Report BT: ok=%d, written=%u, RGB=(%u,%u,%u), LastErr=%u\n",
-                       ok, written, g_lightbarRed, g_lightbarGreen, g_lightbarBlue, GetLastError());
+                LogMsg("[SonyHID] Output Report BT: ok=%d, written=%u, RGB=(%u,%u,%u), R2Mode=0x%02X, L2Mode=0x%02X, targetLen=%u\n",
+                       ok, written, g_lightbarRed, g_lightbarGreen, g_lightbarBlue, g_triggerR2Mode, g_triggerL2Mode, targetLen);
             }
         }
-    } else if (g_sonyDevType == SONY_DEV_DUALSHOCK4) {
+} else if (g_sonyDevType == SONY_DEV_DUALSHOCK4) {
         if (g_sonyIsBluetooth) {
             BYTE report[78];
             memset(report, 0, sizeof(report));
