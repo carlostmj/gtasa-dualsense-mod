@@ -90,6 +90,9 @@ typedef struct {
 typedef void* (*tFindPlayerVehicle)(int playerId, BOOL bIncludeRemote);
 #define FUNC_FindPlayerVehicle ((tFindPlayerVehicle)0x0056E0D0)
 
+typedef void* (*tFindPlayerPed)(int playerId);
+#define FUNC_FindPlayerPed ((tFindPlayerPed)0x0056E210)
+
 #define ADDR_MOUSE_STATE         0x00B73418
 
 #define ADDR_GAME_INVERTMOUSE_Y  0x00BA6745
@@ -216,17 +219,27 @@ static void InitPS5Buttons(void) {
 }
 
 static void EnsureMoveWhileAiming(void) {
-    DWORD* pFlagsM4 = (DWORD*)(0x00C8AAB8 + 30 * 0x70 + 0x18);
-    if (!(*pFlagsM4 & 0x10)) {
-        DWORD oldProtect;
-        if (VirtualProtect((LPVOID)0x00C8AAB8, 80 * 0x70, PAGE_EXECUTE_READWRITE, &oldProtect)) {
-            for (int i = 0; i < 80; i++) {
-                DWORD* pFlags = (DWORD*)(0x00C8AAB8 + i * 0x70 + 0x18);
-                *pFlags |= 0x30; // bMoveAim (0x10) | bMoveFire (0x20)
+    static DWORD s_lastCheck = 0;
+    DWORD now = GetTickCount();
+    if (now - s_lastCheck < 1000) return; // Verifica a cada 1 segundo
+    s_lastCheck = now;
+
+    DWORD oldProtect;
+    if (VirtualProtect((LPVOID)0x00C8AAB8, 80 * 0x70, PAGE_EXECUTE_READWRITE, &oldProtect)) {
+        for (int i = 0; i < 80; i++) {
+            BYTE* pWInfo = (BYTE*)(0x00C8AAB8 + i * 0x70);
+            DWORD* pFlags = (DWORD*)(pWInfo + 0x18);
+            float* pMoveSpeed = (float*)(pWInfo + 0x3C);
+            // Ativa: bCanAim (0x01) | bAimWithArm (0x02) | bMoveAim (0x10) | bMoveFire (0x20)
+            *pFlags |= 0x33;
+            // Remove b1stPerson (0x04) para não travar visão
+            *pFlags &= ~0x04;
+            // Garante velocidade de movimento para a animação mover o personagem
+            if (*pMoveSpeed < 0.65f) {
+                *pMoveSpeed = 0.85f;
             }
-            VirtualProtect((LPVOID)0x00C8AAB8, 80 * 0x70, oldProtect, &oldProtect);
-            LogMsg("[MoveWhileAim] bMoveAim and bMoveFire applied to all 80 weapons!\n");
         }
+        VirtualProtect((LPVOID)0x00C8AAB8, 80 * 0x70, oldProtect, &oldProtect);
     }
 }
 
@@ -1063,12 +1076,24 @@ static void ProcessCustomController(CPad* pad) {
     EnsureMoveWhileAiming();
 
     // 3. Ativa modo Joypad do console para habilitar mira automatica (Auto-Aim / Lock-On)
-    *(BYTE*)0x00B6EC2E = 1;            // m_bJoypadControls = 1 (ativa CPlayerPed::FindWeaponTargetJoypad)
-    pad->Mode = 1;                     // Joypad mode no CPad
+    // NOTA: 0x00B6EC2E e CCamera::m_bUseMouse3rdPerson. Tem que ser 0 para o GTA usar o Lock-On de console!
+    *(BYTE*)0x00B6EC2E = 0;
+    pad->Mode = 0;                     // Mode 0: Padrao classico de console (RightShoulder1 = Mira Lock-on)
     *(BYTE*)(0x00BA6748 + 0xD0) = 0;   // CMenuManager: 0 = Joypad
+    *(BYTE*)0x00BA6818 = 0;            // ControlsManager: 0 = Joypad
 
     void* pVeh = FUNC_FindPlayerVehicle(-1, FALSE);
     BOOL isVehicle = (pVeh != NULL);
+    BOOL isBicycle = FALSE;
+
+    if (isVehicle) {
+        // Checa se o veiculo e bicicleta (BMX, Bike, Mountain Bike)
+        int subClass = *(int*)((BYTE*)pVeh + 0x5A0);
+        WORD modelId = *(WORD*)((BYTE*)pVeh + 0x22);
+        if (subClass == 10 || modelId == 481 || modelId == 509 || modelId == 510) {
+            isBicycle = TRUE;
+        }
+    }
 
     // ANALOG STICK MOVEMENT (Left Stick)
     // Se o controle for movido alem da deadzone, aplica a direcao do controle.
@@ -1109,10 +1134,34 @@ static void ProcessCustomController(CPad* pad) {
     }
 
     if (!isVehicle) {
+        // ====================================================================
         // A PÉ (ON FOOT)
-        // L2: MIRA (Target Lock-on / Free Aim) -> RightShoulder1 (SEM resistência no gatilho!)
+        // ====================================================================
+        
+        // L2: MIRA AUTOMÁTICA DE CONSOLE (Auto-Aim / Lock-On com retículo clássico colorido)
         if (gp.l2 > 30) {
             pad->NewState.RightShoulder1 = 255;
+
+            void* pPlayer = FUNC_FindPlayerPed(-1);
+            if (pPlayer) {
+                void* pTarget = *(void**)((BYTE*)pPlayer + 0x79C); // m_pPlayerTargettedPed
+                if (!pTarget) {
+                    // Invoca o Lock-On nativo do GTA se ainda nao tem alvo selecionado
+                    ((bool (__attribute__((thiscall)) *)(void*))0x0060DC50)(pPlayer);
+                } else {
+                    // Alterna entre alvos com o analogico direito (direita/esquerda)
+                    static DWORD s_lastTargetSwitch = 0;
+                    if (now - s_lastTargetSwitch > 220) {
+                        if (gp.rx > 45) {
+                            s_lastTargetSwitch = now;
+                            ((bool (__attribute__((thiscall)) *)(void*, void*, bool))0x0060E530)(pPlayer, pTarget, false);
+                        } else if (gp.rx < -45) {
+                            s_lastTargetSwitch = now;
+                            ((bool (__attribute__((thiscall)) *)(void*, void*, bool))0x0060E530)(pPlayer, pTarget, true);
+                        }
+                    }
+                }
+            }
         }
 
         // R2: ATIRAR / DISPARAR (Fire Weapon)
@@ -1145,46 +1194,65 @@ static void ProcessCustomController(CPad* pad) {
         if (gp.btnR3) pad->NewState.ShockButtonR = 255; // Olhar para trás
 
     } else {
+        // ====================================================================
         // EM VEÍCULO (IN VEHICLE)
-        // ACELERAÇÃO PROGRESSIVA ANALÓGICA COM R2:
-        // Pressionar leve = velocidade baixa / cruzeiro.
-        // Pressionar tudo = aceleração máxima!
-        if (gp.r2 > 15) {
-            short accel = (short)(((int)(gp.r2 - 15) * 255) / (255 - 15));
-            if (accel > 255) accel = 255;
-            if (accel > pad->NewState.ButtonCross) {
-                pad->NewState.ButtonCross = accel;
+        // ====================================================================
+        if (isBicycle) {
+            // BICICLETA (BMX, Mountain Bike, Bike):
+            // Pedalar e X, e O para frear/voltar! R2 e L2 NAO atuam na bicicleta!
+            if (gp.btnCross) {
+                pad->NewState.ButtonCross = 255;  // Pedalar / Acelerar bicicleta
             }
-        }
-
-        // FREIO E RÉ PROGRESSIVOS ANALÓGICOS COM L2:
-        // Pressionar leve = frenagem suave.
-        // Pressionar tudo = frenagem total / ré rápida!
-        if (gp.l2 > 15) {
-            short brake = (short)(((int)(gp.l2 - 15) * 255) / (255 - 15));
-            if (brake > 255) brake = 255;
-            if (brake > pad->NewState.ButtonSquare) {
-                pad->NewState.ButtonSquare = brake;
+            if (gp.btnCircle) {
+                pad->NewState.ButtonSquare = 255; // Freio / Ré da bicicleta
             }
-        }
+            if (gp.btnSquare) {
+                pad->NewState.RightShoulder1 = 255; // Bunny Hop / Pulo da bike
+            }
+            if (gp.btnTriangle) {
+                pad->NewState.ButtonTriangle = 255; // Sair da bike
+            }
+            if (gp.btnL3) {
+                pad->NewState.ShockButtonL = 255;   // Campainha da bike
+            }
+        } else {
+            // CARROS E MOTOS:
+            // ACELERAÇÃO PROGRESSIVA ANALÓGICA COM R2:
+            if (gp.r2 > 15) {
+                short accel = (short)(((int)(gp.r2 - 15) * 255) / (255 - 15));
+                if (accel > 255) accel = 255;
+                if (accel > pad->NewState.ButtonCross) {
+                    pad->NewState.ButtonCross = accel;
+                }
+            }
 
-        if (gp.btnR1) {
-            pad->NewState.RightShoulder1 = 255; // Freio de mão
-        }
-        if (gp.btnCircle) {
-            pad->NewState.ButtonCircle = 255;   // Atirar do carro
-        }
-        if (gp.btnTriangle) {
-            pad->NewState.ButtonTriangle = 255; // Sair do carro
-        }
-        if (gp.btnL1) {
-            pad->NewState.LeftShoulder1 = 255;  // Olhar para trás
-        }
-        if (gp.btnL3) {
-            pad->NewState.ShockButtonL = 255;   // Buzina
-        }
-        if (gp.btnR3) {
-            pad->NewState.ShockButtonR = 255;   // Missão veículo
+            // FREIO E RÉ PROGRESSIVOS ANALÓGICOS COM L2:
+            if (gp.l2 > 15) {
+                short brake = (short)(((int)(gp.l2 - 15) * 255) / (255 - 15));
+                if (brake > 255) brake = 255;
+                if (brake > pad->NewState.ButtonSquare) {
+                    pad->NewState.ButtonSquare = brake;
+                }
+            }
+
+            if (gp.btnR1) {
+                pad->NewState.RightShoulder1 = 255; // Freio de mão
+            }
+            if (gp.btnCircle) {
+                pad->NewState.ButtonCircle = 255;   // Atirar do carro
+            }
+            if (gp.btnTriangle) {
+                pad->NewState.ButtonTriangle = 255; // Sair do carro
+            }
+            if (gp.btnL1) {
+                pad->NewState.LeftShoulder1 = 255;  // Olhar para trás
+            }
+            if (gp.btnL3) {
+                pad->NewState.ShockButtonL = 255;   // Buzina
+            }
+            if (gp.btnR3) {
+                pad->NewState.ShockButtonR = 255;   // Missão veículo
+            }
         }
     }
 
