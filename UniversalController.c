@@ -253,13 +253,17 @@ static void EnsureMoveWhileAiming(void) {
             // Ativa: bCanAim (0x01) | bMoveAim (0x10) | bMoveFire (0x20)
             *pFlags |= 0x31;
 
-            // Remove b1stPerson (0x04) para não travar visão
-            *pFlags &= ~0x04;
+            // NÃO remove b1stPerson de armas com mira telescópica ou câmera (Sniper 358, RPG 359, Heatseeker 360, Câmera 367)
+            if (modelId == 358 || modelId == 359 || modelId == 360 || modelId == 367) {
+                *pFlags |= 0x04; // Mantém o Scope telescópico da Sniper e RPG com retícula e zoom 100% funcionais!
+            } else {
+                *pFlags &= ~0x04; // Armas convencionais usam mira livre em 3ª pessoa sobre o ombro
+            }
 
-            // Armas pesadas e rifles de duas mãos (M4, AK-47, Shotguns, MP5, Sniper, Rifles, etc.)
+            // Armas pesadas e rifles de duas mãos (M4, AK-47, Shotguns, MP5, etc.)
             // NÃO podem ter bAimWithArm (0x02), senão a engine não chama PlayerControlZeldaWeapon!
-            // Somente armas de uma mão (Pistola 346, Sawnoff 350, Uzi 352, Tec9 372) mantêm bAimWithArm.
-            if (modelId != 346 && modelId != 350 && modelId != 352 && modelId != 372) {
+            // Somente armas de uma mão e a Sniper mantêm suas configurações originais.
+            if (modelId != 346 && modelId != 350 && modelId != 352 && modelId != 372 && modelId != 358) {
                 *pFlags &= ~0x02;
             }
 
@@ -392,8 +396,6 @@ static unsigned char g_targetLeftMotor = 0;
 static unsigned char g_targetRightMotor = 0;
 static unsigned char g_lastSentLeftMotor = 0xFF;
 static unsigned char g_lastSentRightMotor = 0xFF;
-static volatile BOOL g_triggerGunActive = FALSE;
-static volatile BOOL g_lastSentTriggerGun = FALSE;
 static DWORD g_lastOutputTick = 0;
 
 // ============================================================================
@@ -475,7 +477,24 @@ static volatile BYTE g_lightbarRed = 0;
 static volatile BYTE g_lightbarGreen = 120;
 static volatile BYTE g_lightbarBlue = 255;
 
-static void SendDualSenseHardwareReport(HANDLE hDev, BYTE leftMotor, BYTE rightMotor, BOOL gunTrigger) {
+static volatile BYTE g_triggerR2Mode = 0;
+static volatile BYTE g_triggerR2Param1 = 0;
+static volatile BYTE g_triggerR2Param2 = 0;
+static volatile BYTE g_triggerL2Mode = 0;
+static volatile BYTE g_triggerL2Param1 = 0;
+static volatile BYTE g_triggerL2Param2 = 0;
+
+static volatile BYTE g_lastSentR2Mode = 0xFF;
+static volatile BYTE g_lastSentR2P1 = 0xFF;
+static volatile BYTE g_lastSentR2P2 = 0xFF;
+static volatile BYTE g_lastSentL2Mode = 0xFF;
+static volatile BYTE g_lastSentL2P1 = 0xFF;
+static volatile BYTE g_lastSentL2P2 = 0xFF;
+static volatile BYTE g_lastSentRed = 0xFF;
+static volatile BYTE g_lastSentGreen = 0xFF;
+static volatile BYTE g_lastSentBlue = 0xFF;
+
+static void SendDualSenseHardwareReport(HANDLE hDev, BYTE leftMotor, BYTE rightMotor) {
     if (g_sonyDevType == SONY_DEV_DUALSENSE) {
         BYTE report[78];
         memset(report, 0, sizeof(report));
@@ -487,25 +506,17 @@ static void SendDualSenseHardwareReport(HANDLE hDev, BYTE leftMotor, BYTE rightM
         report[4] = rightMotor; // High-frequency weak rumble
         report[5] = leftMotor;  // Low-frequency strong rumble
 
-        // R2 (Gatilho de Disparo): Resistência mecânica ATIVADA SOMENTE COM ARMA DE FOGO!
-        // Sem arma / Em veículo / Menus: 100% suave e livre, sem resistência desnecessária!
-        if (gunTrigger) {
-            report[11] = 0x02; // Section Resistance / Rigid Stop
-            report[12] = 0x02;
-            report[13] = 25;   // Ponto onde o gatilho começa a oferecer resistência
-            report[14] = 175;  // Resistência tátil de peso de gatilho
-        } else {
-            report[11] = 0x00; // Desativado
-            report[12] = 0x00;
-            report[13] = 0;
-            report[14] = 0;
-        }
+        // R2 (Aceleração / Troca de Marcha / Tiro de Arma):
+        report[11] = g_triggerR2Mode;
+        report[12] = (g_triggerR2Mode != 0) ? 0x02 : 0x00;
+        report[13] = g_triggerR2Param1;
+        report[14] = g_triggerR2Param2;
 
-        // L2 (ONDE MIRA): NUNCA TEM RESISTÊNCIA! 100% suave e livre conforme pedido do usuário!
-        report[22] = 0x00;
-        report[23] = 0x00;
-        report[24] = 0;
-        report[25] = 0;
+        // L2 (Freio / ABS / Mira):
+        report[22] = g_triggerL2Mode;
+        report[23] = (g_triggerL2Mode != 0) ? 0x02 : 0x00;
+        report[24] = g_triggerL2Param1;
+        report[25] = g_triggerL2Param2;
 
         // Lightbar & Player LEDs
         report[40] = 0x02; // Uninterruptable LED
@@ -587,9 +598,11 @@ static DWORD WINAPI DualSenseWorkerThread(LPVOID lpParam) {
                        g_sonyDevType == SONY_DEV_DUALSHOCK4 ? "DualShock 4 (PS4)" : "DualSense (PS5)");
                 g_lastSentLeftMotor = 0;
                 g_lastSentRightMotor = 0;
-                g_lastSentTriggerGun = FALSE;
+                g_lastSentR2Mode = 0xFF;
+                g_lastSentL2Mode = 0xFF;
+                g_lastSentRed = 0xFF;
                 g_lastOutputTick = GetTickCount();
-                SendDualSenseHardwareReport(g_hDualSense, 0, 0, FALSE);
+                SendDualSenseHardwareReport(g_hDualSense, 0, 0);
             } else {
                 Sleep(1000);
                 continue;
@@ -599,15 +612,26 @@ static DWORD WINAPI DualSenseWorkerThread(LPVOID lpParam) {
         // 1. Output update (Rumble, Triggers & Lightbar heartbeat)
         DWORD now = GetTickCount();
         BOOL motorChanged = (g_targetLeftMotor != g_lastSentLeftMotor || g_targetRightMotor != g_lastSentRightMotor);
-        BOOL triggerChanged = (g_triggerGunActive != g_lastSentTriggerGun);
-        BOOL heartbeat = (now - g_lastOutputTick) >= 400;
+        BOOL triggerChanged = (g_triggerR2Mode != g_lastSentR2Mode || g_triggerR2Param1 != g_lastSentR2P1 ||
+                               g_triggerR2Param2 != g_lastSentR2P2 || g_triggerL2Mode != g_lastSentL2Mode ||
+                               g_triggerL2Param1 != g_lastSentL2P1 || g_triggerL2Param2 != g_lastSentL2P2);
+        BOOL lightbarChanged = (g_lightbarRed != g_lastSentRed || g_lightbarGreen != g_lastSentGreen || g_lightbarBlue != g_lastSentBlue);
+        BOOL heartbeat = (now - g_lastOutputTick) >= 150;
 
-        if (motorChanged || triggerChanged || heartbeat) {
+        if (motorChanged || triggerChanged || lightbarChanged || heartbeat) {
             g_lastSentLeftMotor = g_targetLeftMotor;
             g_lastSentRightMotor = g_targetRightMotor;
-            g_lastSentTriggerGun = g_triggerGunActive;
+            g_lastSentR2Mode = g_triggerR2Mode;
+            g_lastSentR2P1 = g_triggerR2Param1;
+            g_lastSentR2P2 = g_triggerR2Param2;
+            g_lastSentL2Mode = g_triggerL2Mode;
+            g_lastSentL2P1 = g_triggerL2Param1;
+            g_lastSentL2P2 = g_triggerL2Param2;
+            g_lastSentRed = g_lightbarRed;
+            g_lastSentGreen = g_lightbarGreen;
+            g_lastSentBlue = g_lightbarBlue;
             g_lastOutputTick = now;
-            SendDualSenseHardwareReport(g_hDualSense, g_lastSentLeftMotor, g_lastSentRightMotor, g_lastSentTriggerGun);
+            SendDualSenseHardwareReport(g_hDualSense, g_lastSentLeftMotor, g_lastSentRightMotor);
         }
 
         // 2. Read hardware input stream
@@ -748,7 +772,7 @@ static DWORD WINAPI DualSenseWorkerThread(LPVOID lpParam) {
     }
 
     if (g_hDualSense != INVALID_HANDLE_VALUE) {
-        SendDualSenseHardwareReport(g_hDualSense, 0, 0, FALSE);
+        SendDualSenseHardwareReport(g_hDualSense, 0, 0);
         CloseHandle(g_hDualSense);
         g_hDualSense = INVALID_HANDLE_VALUE;
         g_sonyDevType = SONY_DEV_NONE;
@@ -958,6 +982,10 @@ static void ProcessCustomController(CPad* pad) {
     }
 
     DWORD now = GetTickCount();
+    static DWORD s_rumbleUntil = 0;
+    static BYTE s_rumbleLeft = 0;
+    static BYTE s_rumbleRight = 0;
+    static BYTE s_lastR2 = 0;
 
     gp.lx = ApplyDeadzoneVal(gp.lx, g_cfg.deadzoneLeft);
     gp.ly = ApplyDeadzoneVal(gp.ly, g_cfg.deadzoneLeft);
@@ -984,11 +1012,52 @@ static void ProcessCustomController(CPad* pad) {
     BYTE isMenuActive = *(BYTE*)ADDR_MENU_ACTIVE;
     char curMenuPage = *(char*)ADDR_CURRENT_MENU_PAGE;
 
-    // GATILHOS ADAPTATIVOS DUALSENSE:
-    // Resistência no R2 ATIVA SOMENTE SE ESTIVER EMPUNHANDO UMA ARMA DE FOGO!
-    // Se estiver desarmado, socos, faca, veículos ou menus -> 100% livre e macio!
-    // L2 (MIRA): NUNCA TEM RESISTÊNCIA! 100% livre e macio!
-    g_triggerGunActive = (!isMenuActive && IsPlayerHoldingFirearm());
+    // ========================================================================
+    // SISTEMA DE LIGHTBAR DINÂMICA (PS5 DUALSENSE & DUALSHOCK 4)
+    // ========================================================================
+    void* pPlayerPed = FUNC_FindPlayerPed(-1);
+    if (pPlayerPed) {
+        DWORD wantedLevel = 0;
+        BYTE* pPlayerData = *(BYTE**)((BYTE*)pPlayerPed + 0x480);
+        if (pPlayerData) {
+            BYTE* pWanted = *(BYTE**)pPlayerData;
+            if (pWanted) {
+                wantedLevel = *(DWORD*)(pWanted + 0x2C);
+            }
+        }
+
+        if (wantedLevel > 0) {
+            // Perseguição Policial: Giroflex piscando alternado Vermelho / Azul!
+            if ((now / 180) % 2 == 0) {
+                g_lightbarRed = 255; g_lightbarGreen = 0; g_lightbarBlue = 0;
+            } else {
+                g_lightbarRed = 0; g_lightbarGreen = 40; g_lightbarBlue = 255;
+            }
+        } else {
+            // Status de Saúde do CJ
+            float health = *(float*)((BYTE*)pPlayerPed + 0x540);
+            if (health > 70.0f) {
+                // Vida Cheia / Saudável: Verde Grove Street
+                g_lightbarRed = 30; g_lightbarGreen = 220; g_lightbarBlue = 40;
+            } else if (health > 35.0f) {
+                // Vida Média / Ferido: Laranja / Amarelo
+                g_lightbarRed = 255; g_lightbarGreen = 140; g_lightbarBlue = 0;
+            } else if (health > 15.0f) {
+                // Vida Baixa / Perigo: Vermelho
+                g_lightbarRed = 255; g_lightbarGreen = 20; g_lightbarBlue = 20;
+            } else {
+                // Vida Crítica (< 15%): Batimento cardíaco pulsando em vermelho
+                if ((now / 250) % 2 == 0) {
+                    g_lightbarRed = 255; g_lightbarGreen = 0; g_lightbarBlue = 0;
+                } else {
+                    g_lightbarRed = 40; g_lightbarGreen = 0; g_lightbarBlue = 0;
+                }
+            }
+        }
+    } else {
+        // Padrão PS5: Azul Suave
+        g_lightbarRed = 0; g_lightbarGreen = 120; g_lightbarBlue = 255;
+    }
 
     // SHARE / TOUCHPAD: Direct Map Shortcut
     static BOOL s_lastMapBtn = FALSE;
@@ -1033,7 +1102,8 @@ static void ProcessCustomController(CPad* pad) {
     // FRONTEND / MENU NAVIGATION
     // ========================================================================
     if (isMenuActive != 0) {
-        g_triggerGunActive = FALSE;
+        g_triggerR2Mode = 0; g_triggerR2Param1 = 0; g_triggerR2Param2 = 0;
+        g_triggerL2Mode = 0; g_triggerL2Param1 = 0; g_triggerL2Param2 = 0;
         
         // Mantém suporte para fechar o menu com Start
         if (gp.btnStart) pad->NewState.Start = 255;
@@ -1189,6 +1259,38 @@ static void ProcessCustomController(CPad* pad) {
             }
         }
 
+        // --------------------------------------------------------------------
+        // GATILHOS ADAPTÁVEIS A PÉ:
+        // --------------------------------------------------------------------
+        float timeCanRun = 10.0f;
+        if (pPlayerPed) {
+            BYTE* pPlayerData = *(BYTE**)((BYTE*)pPlayerPed + 0x480);
+            if (pPlayerData) {
+                timeCanRun = *(float*)(pPlayerData + 0x18);
+            }
+        }
+
+        if (IsPlayerHoldingFirearm()) {
+            // Arma de fogo: Gatilho mecânico com duplo estágio (resistência aos 25% e clique aos 175)
+            g_triggerR2Mode = 0x02; // Section Resistance
+            g_triggerR2Param1 = 25; // Ponto do clique
+            g_triggerR2Param2 = 175;// Força mecânica do gatilho
+            g_triggerL2Mode = 0x00; // L2 100% livre para puxar a mira livremente!
+        } else if (timeCanRun <= 0.5f) {
+            // CJ Exausto / Sem fôlego (Stamina zerada): Gatilhos pesados e trêmulos simulando cansaço físico
+            BOOL tiredPulse = ((now / 120) % 2 == 0);
+            g_triggerR2Mode = 0x01; // Continuous Resistance
+            g_triggerR2Param1 = 10;
+            g_triggerR2Param2 = tiredPulse ? 170 : 70;
+            g_triggerL2Mode = 0x01;
+            g_triggerL2Param1 = 10;
+            g_triggerL2Param2 = tiredPulse ? 170 : 70;
+        } else {
+            // Desarmado / Faca / Normal: Gatilhos 100% livres e macios
+            g_triggerR2Mode = 0x00; g_triggerR2Param1 = 0; g_triggerR2Param2 = 0;
+            g_triggerL2Mode = 0x00; g_triggerL2Param1 = 0; g_triggerL2Param2 = 0;
+        }
+
         // BOTÕES DE FACE (Preserva teclado se pressionado)
         if (gp.btnCross)    pad->NewState.ButtonCross    = 255; // Correr / Sprint
         if (gp.btnSquare)   pad->NewState.ButtonSquare   = 255; // Pulo / Escalar
@@ -1217,7 +1319,48 @@ static void ProcessCustomController(CPad* pad) {
         // ====================================================================
         // EM VEÍCULO (IN VEHICLE)
         // ====================================================================
+        float vehHealth = *(float*)((BYTE*)pVeh + 0x4C0);
+        BYTE curGear = *(BYTE*)((BYTE*)pVeh + 0x4A8) & 7;
+        WORD modelId = *(WORD*)((BYTE*)pVeh + 0x22);
+
+        // A. TROCA DE MARCHA (GEAR SHIFT SNAP NO R2)
+        static BYTE s_lastGear = 0;
+        static DWORD s_gearSnapUntil = 0;
+        if (!isBicycle && curGear != s_lastGear) {
+            if (curGear > 1 && s_lastGear >= 1) {
+                s_gearSnapUntil = now + 120; // Tranco de 120ms no R2
+                if (s_rumbleRight < 130) s_rumbleRight = 130;
+                if (now + 60 > s_rumbleUntil) s_rumbleUntil = now + 60;
+            }
+            s_lastGear = curGear;
+        }
+
+        // B. DANO CRÍTICO DO MOTOR (HP < 300: MOTOR FALHANDO / BATENDO BIELA)
+        if (vehHealth > 0.0f && vehHealth < 300.0f) {
+            // Vibração fraca e engasgada irregular
+            if ((now / 160) % 3 == 0) {
+                if (s_rumbleLeft < 85) s_rumbleLeft = 85;
+                if (s_rumbleRight < 40) s_rumbleRight = 40;
+                if (now + 70 > s_rumbleUntil) s_rumbleUntil = now + 70;
+            }
+        }
+
+        // C. CONFIGURAÇÃO DE GATILHOS ADAPTÁVEIS NO VEÍCULO:
         if (isBicycle) {
+            float timeCanRun = 10.0f;
+            if (pPlayerPed) {
+                BYTE* pPlayerData = *(BYTE**)((BYTE*)pPlayerPed + 0x480);
+                if (pPlayerData) timeCanRun = *(float*)(pPlayerData + 0x18);
+            }
+            if (timeCanRun <= 0.5f) {
+                BOOL tiredPulse = ((now / 120) % 2 == 0);
+                g_triggerR2Mode = 0x01; g_triggerR2Param1 = 10; g_triggerR2Param2 = tiredPulse ? 160 : 60;
+                g_triggerL2Mode = 0x01; g_triggerL2Param1 = 10; g_triggerL2Param2 = tiredPulse ? 160 : 60;
+            } else {
+                g_triggerR2Mode = 0; g_triggerR2Param1 = 0; g_triggerR2Param2 = 0;
+                g_triggerL2Mode = 0; g_triggerL2Param1 = 0; g_triggerL2Param2 = 0;
+            }
+
             // BICICLETA (BMX, Mountain Bike, Bike):
             // Pedalar e X, e O para frear/voltar! R2 e L2 NAO atuam na bicicleta!
             if (gp.btnCross) {
@@ -1236,6 +1379,43 @@ static void ProcessCustomController(CPad* pad) {
                 pad->NewState.ShockButtonL = 255;   // Campainha da bike
             }
         } else {
+            // R2 (Aceleração):
+            if (now < s_gearSnapUntil) {
+                // Snap mecânico de troca de marcha no R2!
+                g_triggerR2Mode = 0x02; // Rigid Stop
+                g_triggerR2Param1 = 10;
+                g_triggerR2Param2 = 220;
+            } else {
+                // Aceleração suave e progressiva
+                g_triggerR2Mode = 0x00;
+                g_triggerR2Param1 = 0;
+                g_triggerR2Param2 = 0;
+            }
+
+            // L2 (Freio / ABS):
+            // Veículos pesados (Caminhões, Ônibus, Tanques, etc.)
+            BOOL isHeavy = (modelId == 403 || modelId == 406 || modelId == 407 || modelId == 408 ||
+                            modelId == 431 || modelId == 432 || modelId == 437 || modelId == 443 ||
+                            modelId == 514 || modelId == 515 || modelId == 524 || modelId == 573);
+
+            if (gp.l2 > 80) {
+                // Frenagem forte: Simulação de ABS pulsante no pedal/gatilho L2!
+                BOOL absPulse = ((now / 70) % 2 == 0);
+                g_triggerL2Mode = 0x01; // Continuous Resistance
+                g_triggerL2Param1 = absPulse ? 35 : 10;
+                g_triggerL2Param2 = absPulse ? 210 : 70;
+            } else if (isHeavy) {
+                // Caminhão pesado: freio mais rígido e com maior resistência
+                g_triggerL2Mode = 0x01;
+                g_triggerL2Param1 = 15;
+                g_triggerL2Param2 = 160;
+            } else {
+                // Carro normal: freio suave e macio
+                g_triggerL2Mode = 0x00;
+                g_triggerL2Param1 = 0;
+                g_triggerL2Param2 = 0;
+            }
+
             // CARROS E MOTOS:
             // ACELERAÇÃO PROGRESSIVA ANALÓGICA COM R2:
             if (gp.r2 > 15) {
@@ -1279,11 +1459,6 @@ static void ProcessCustomController(CPad* pad) {
     // ========================================================================
     // 5. VIBRAÇÃO HÁPTICA / RUMBLE REAL NO DUALSENSE
     // ========================================================================
-    static DWORD s_rumbleUntil = 0;
-    static BYTE s_rumbleLeft = 0;
-    static BYTE s_rumbleRight = 0;
-    static BYTE s_lastR2 = 0;
-
     // Disparo de tiro com R2: pulso de recuo seco e rápido (85ms)
     if (!isVehicle && gp.r2 > 50 && s_lastR2 <= 50) {
         s_rumbleLeft = 140;
