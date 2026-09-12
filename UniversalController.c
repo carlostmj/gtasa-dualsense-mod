@@ -236,53 +236,6 @@ static BOOL __attribute__((thiscall)) Hooked_ControlGunMove(void* thisTask, cons
     return TRUE;
 }
 
-typedef struct {
-    float x;
-    float y;
-    float z;
-} CVector_t;
-
-// Verifica se o alvo está dentro do cone de assistência de mira (próximo à retícula/crosshair)
-// isAcquisition = TRUE: cone de ~20 graus (dot >= 0.94) para travar só se estiver olhando perto do inimigo
-// isAcquisition = FALSE: cone de ~36 graus (dot >= 0.80) para rastrear sem soltar instantaneamente
-static BOOL IsTargetInAimAssistCone(void* pPlayer, void* pTarget, BOOL isAcquisition) {
-    if (!pPlayer || !pTarget) return FALSE;
-
-    // Obtém posição do alvo (m_matrix->pos ou entity->pos)
-    void* targetMatrix = *(void**)((BYTE*)pTarget + 0x14);
-    CVector_t targetPos;
-    if (targetMatrix) {
-        targetPos = *(CVector_t*)((BYTE*)targetMatrix + 0x30);
-    } else {
-        targetPos = *(CVector_t*)((BYTE*)pTarget + 0x04);
-    }
-    targetPos.z += 0.35f; // Mira na altura do torso
-
-    // Câmera ativa do GTA SA (TheCamera @ 0x00B6F028, CCam[0] @ offset 0x174)
-    BYTE* pCam0 = (BYTE*)0x00B6F028 + 0x174;
-    CVector_t camFront = *(CVector_t*)(pCam0 + 0x190); // m_vecFront
-    CVector_t camPos   = *(CVector_t*)(pCam0 + 0x19C); // m_vecSource
-
-    float dx = targetPos.x - camPos.x;
-    float dy = targetPos.y - camPos.y;
-    float dz = targetPos.z - camPos.z;
-    float distSq = dx * dx + dy * dy + dz * dz;
-
-    // Distância mínima (1m) e máxima de assistência (45m)
-    if (distSq < 1.0f || distSq > (45.0f * 45.0f)) return FALSE;
-
-    float dist = sqrtf(distSq);
-    float dirX = dx / dist;
-    float dirY = dy / dist;
-    float dirZ = dz / dist;
-
-    // Produto escalar com o vetor frontal da câmera
-    float dot = dirX * camFront.x + dirY * camFront.y + dirZ * camFront.z;
-
-    float minDot = isAcquisition ? 0.94f : 0.80f;
-    return (dot >= minDot);
-}
-
 static void EnsureMoveWhileAiming(void) {
     static DWORD s_lastCheck = 0;
     DWORD now = GetTickCount();
@@ -1081,40 +1034,34 @@ static void ProcessCustomController(CPad* pad) {
     // ========================================================================
     if (isMenuActive != 0) {
         g_triggerGunActive = FALSE;
-        // Inversao corrigida para navegacao de menu: D-Pad Cima SOBE o cursor, D-Pad Baixo DESCE!
-        if (gp.dpadUp || gp.ly < -50)          pad->NewState.DPadDown = 255;
-        if (gp.dpadDown || gp.ly > 50)        pad->NewState.DPadUp = 255;
-        if (gp.dpadLeft || gp.lx < -50)       pad->NewState.DPadLeft = 255;
-        if (gp.dpadRight || gp.lx > 50)      pad->NewState.DPadRight = 255;
-        if (gp.btnCross)                      pad->NewState.ButtonCross = 255;
-        if (gp.btnTriangle || gp.btnCircle)   pad->NewState.ButtonTriangle = 255;
-        if (gp.btnStart)                      pad->NewState.Start = 255;
-        if (abs(gp.lx) > 8) pad->NewState.LeftStickX = gp.lx;
-        if (abs(gp.ly) > 8) pad->NewState.LeftStickY = -gp.ly;
+        
+        // Mantém suporte para fechar o menu com Start
+        if (gp.btnStart) pad->NewState.Start = 255;
 
-        // Also trigger ProcessUserInput for instant responsive cursor/item navigation
+        // Navegação precisa de itens do Menu via CMenuManager::ProcessUserInput
+        // NOTA: Não escrevemos em pad->NewState.DPad* para evitar pulo duplo de opções nos submenus!
         static DWORD s_nextNavRepeat = 0;
         static int s_activeDir = 0;
 
         int curDir = 0;
-        if (gp.dpadUp || gp.ly < -60) curDir = 1;
-        else if (gp.dpadDown || gp.ly > 60) curDir = 2;
-        else if (gp.dpadLeft || gp.lx < -60) curDir = 3;
-        else if (gp.dpadRight || gp.lx > 60) curDir = 4;
+        if (gp.dpadUp || gp.ly < -60) curDir = 1;       // CIMA
+        else if (gp.dpadDown || gp.ly > 60) curDir = 2; // BAIXO
+        else if (gp.dpadLeft || gp.lx < -60) curDir = 3;// ESQUERDA
+        else if (gp.dpadRight || gp.lx > 60) curDir = 4;// DIREITA
 
         char down = 0, up = 0, input = 0;
         if (curDir != 0) {
             if (curDir != s_activeDir) {
                 s_activeDir = curDir;
-                s_nextNavRepeat = now + 300;
-                if (curDir == 1) down = 1;        // Invertido: curDir 1 (CIMA) move a selecao para CIMA!
-                else if (curDir == 2) up = 1;    // Invertido: curDir 2 (BAIXO) move a selecao para BAIXO!
-                else if (curDir == 3) input = -1;
-                else if (curDir == 4) input = 1;
+                s_nextNavRepeat = now + 350;     // Delay inicial de 350ms para evitar pulo acidental
+                if (curDir == 1) up = 1;         // CIMA -> decrementa índice (sobe 1 item)
+                else if (curDir == 2) down = 1;  // BAIXO -> incrementa índice (desce 1 item)
+                else if (curDir == 3) input = -1;// ESQUERDA -> slider / opção anterior
+                else if (curDir == 4) input = 1; // DIREITA -> slider / próxima opção
             } else if (now >= s_nextNavRepeat) {
-                s_nextNavRepeat = now + 120;
-                if (curDir == 1) down = 1;
-                else if (curDir == 2) up = 1;
+                s_nextNavRepeat = now + 160;     // Taxa de repetição contínua (160ms) ao segurar
+                if (curDir == 1) up = 1;
+                else if (curDir == 2) down = 1;
                 else if (curDir == 3) input = -1;
                 else if (curDir == 4) input = 1;
             }
@@ -1218,8 +1165,11 @@ static void ProcessCustomController(CPad* pad) {
         // A PÉ (ON FOOT)
         // ====================================================================
         
-        // MIRA ASSISTIDA (L2 no Controle OU Botão Direito do Mouse):
-        BOOL bAimBtn = (gp.l2 > 30) || (pad->NewState.RightShoulder1 > 0);
+        // --------------------------------------------------------------------
+        // MIRA 100% LIVRE (L2 no Controle OU Botão Direito do Mouse):
+        // Puxa a mira sobre o ombro com a retícula (crosshair) na tela.
+        // O jogador tem controle total da mira pelo Analógico Direito e pelo Mouse.
+        // --------------------------------------------------------------------
         if (gp.l2 > 30) {
             pad->NewState.RightShoulder1 = 255;
         }
@@ -1229,48 +1179,13 @@ static void ProcessCustomController(CPad* pad) {
             pad->NewState.ButtonCircle = 255;
         }
 
-        if (bAimBtn && IsPlayerHoldingFirearm()) {
-            void* pPlayer = FUNC_FindPlayerPed(-1);
-            if (pPlayer) {
-                void* pTarget = *(void**)((BYTE*)pPlayer + 0x79C); // m_pPlayerTargettedPed
-                if (!pTarget) {
-                    // Só trava o alvo se a retícula estiver próxima de algum inimigo (cone estreito ~20°)
-                    BOOL found = ((bool (__attribute__((thiscall)) *)(void*))0x0060DC50)(pPlayer);
-                    if (found) {
-                        void* candidate = *(void**)((BYTE*)pPlayer + 0x79C);
-                        if (candidate && !IsTargetInAimAssistCone(pPlayer, candidate, TRUE)) {
-                            // Inimigo fora do cone de mira próxima -> rejeita para manter a mira livre!
-                            ((void (__attribute__((thiscall)) *)(void*))0x0060D5A0)(pPlayer); // ClearWeaponTarget
-                        }
-                    }
-                } else {
-                    // Já possui alvo: verifica se ainda está vivo e dentro da área de assistência (~36°)
-                    float health = *(float*)((BYTE*)pTarget + 0x540);
-                    if (health <= 0.0f || !IsTargetInAimAssistCone(pPlayer, pTarget, FALSE)) {
-                        ((void (__attribute__((thiscall)) *)(void*))0x0060D5A0)(pPlayer); // ClearWeaponTarget
-                    } else {
-                        // Alterna entre alvos se inclinar o analógico direito
-                        static DWORD s_lastTargetSwitch = 0;
-                        if (now - s_lastTargetSwitch > 250) {
-                            if (gp.rx > 55) {
-                                s_lastTargetSwitch = now;
-                                ((bool (__attribute__((thiscall)) *)(void*, void*, bool))0x0060E530)(pPlayer, pTarget, false);
-                            } else if (gp.rx < -55) {
-                                s_lastTargetSwitch = now;
-                                ((bool (__attribute__((thiscall)) *)(void*, void*, bool))0x0060E530)(pPlayer, pTarget, true);
-                            }
-                        }
-                    }
-                }
-            }
-        } else {
-            // Não está mirando: limpa qualquer alvo travado para deixar a câmera 100% livre
-            void* pPlayer = FUNC_FindPlayerPed(-1);
-            if (pPlayer) {
-                void* pTarget = *(void**)((BYTE*)pPlayer + 0x79C);
-                if (pTarget) {
-                    ((void (__attribute__((thiscall)) *)(void*))0x0060D5A0)(pPlayer); // ClearWeaponTarget
-                }
+        // REMOVE 100% A MIRA AUTOMÁTICA (Sem cones/triângulos verdes girando e sem lock-on)
+        // Garante que CJ nunca trave mira em pedestres e a câmera nunca fique presa
+        void* pPlayer = FUNC_FindPlayerPed(-1);
+        if (pPlayer) {
+            void* pTarget = *(void**)((BYTE*)pPlayer + 0x79C);
+            if (pTarget) {
+                ((void (__attribute__((thiscall)) *)(void*))0x0060D5A0)(pPlayer); // ClearWeaponTarget
             }
         }
 
@@ -1467,15 +1382,16 @@ static void InstallHook(void) {
         LogMsg("[Hook] FAILED VirtualProtect at 0x0061E0C0\n");
     }
 
-    // 3. Patch NOP em 0x00685A7A (ClearWeaponTarget no ProcessPlayerWeapon quando mouse está ativo):
-    // Permite que o mouse e teclado funcionem com mira livre enquanto a mira assistida atua
-    // somente quando o alvo estiver próximo ao centro da tela!
-    if (VirtualProtect((LPVOID)0x00685A7A, 5, PAGE_EXECUTE_READWRITE, &oldProtect)) {
-        memset((void*)0x00685A7A, 0x90, 5);
-        VirtualProtect((LPVOID)0x00685A7A, 5, oldProtect, &oldProtect);
-        LogMsg("[Hook] NOP 0x00685A7A (ClearWeaponTarget mouse-block) OK\n");
+    // 3. Desativa permanentemente a busca de alvos para auto-aim no engine (CPlayerPed::FindWeaponLockOnTarget - 0x0060DC50)
+    // Isso garante que NUNCA seja criado um cone/triângulo 3D girando sobre a cabeça de nenhum ped,
+    // e o CJ nunca trave a mira automaticamente em ninguém. 100% Mira Livre (Free Aim) moderna!
+    if (VirtualProtect((LPVOID)0x0060DC50, 3, PAGE_EXECUTE_READWRITE, &oldProtect)) {
+        BYTE noAutoAim[] = { 0x31, 0xC0, 0xC3 }; // xor eax, eax; ret
+        memcpy((void*)0x0060DC50, noAutoAim, sizeof(noAutoAim));
+        VirtualProtect((LPVOID)0x0060DC50, 3, oldProtect, &oldProtect);
+        LogMsg("[Hook] CPlayerPed::FindWeaponLockOnTarget permanently disabled (100%% Free Aim)!\n");
     } else {
-        LogMsg("[Hook] FAILED VirtualProtect at 0x00685A7A\n");
+        LogMsg("[Hook] FAILED VirtualProtect at 0x0060DC50\n");
     }
 }
 
@@ -1487,8 +1403,8 @@ BOOL WINAPI DllMain(HINSTANCE hinstDLL, DWORD fdwReason, LPVOID lpvReserved) {
     if (fdwReason == DLL_PROCESS_ATTACH) {
         DisableThreadLibraryCalls(hinstDLL);
         LogMsg("====================================================\n");
-        LogMsg(" Universal Controller Mod v2.6.0 (DualSense & DualShock 4 Engine Direct)\n");
-        LogMsg(" PS5 Icons + Auto-Aim Lock-On + Move While Aiming\n");
+        LogMsg(" Universal Controller Mod v2.7.0 (DualSense & DualShock 4 Direct)\n");
+        LogMsg(" 100%% Pure Free Aim + PS5 Icons + Fixed Menu Navigation\n");
         LogMsg(" Built exclusively for GTA San Andreas\n");
         LogMsg("====================================================\n");
         LoadConfig();
