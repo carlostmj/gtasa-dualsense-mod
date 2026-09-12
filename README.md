@@ -1,47 +1,67 @@
-# 🎮 GTA San Andreas — DualSense PS5 Mod (Universal Controller v2.8.0)
+# 🎮 GTA San Andreas — DualSense PS5 Mod (Universal Controller v3.0.0)
 
 > Suporte nativo completo e direto aos controles **PlayStation 5 DualSense** e **PlayStation 4 DualShock 4** para Grand Theft Auto: San Andreas (PC).
-> Comunicação direta via HID (USB e Bluetooth), gatilhos adaptáveis contextuais, vibração de alta fidelidade, lightbar dinâmica RGB em tempo real e mira livre aprimorada.
+> Comunicação direta via HID (USB e Bluetooth), mira por giroscópio (Gyro Aiming), Roda de Armas com Bullet Time, gestos no Touchpad, gatilhos adaptáveis contextuais, vibração de alta fidelidade e lightbar dinâmica RGB em tempo real.
 
 ---
 
 ## 🌟 Principais Funcionalidades
 
-### 🌈 1. Lightbar Dinâmica RGB em Tempo Real
-A barra de luz do DualSense e DualShock 4 reage dinamicamente aos acontecimentos e estado físico do CJ no jogo:
+### 🎯 1. Gyro Aiming (Mira por Giroscópio no L2)
+- **Precisão Cirúrgica**: Ao segurar **L2** (ou mirar com qualquer arma telescópica/pesada), o giroscópio de 6 eixos do DualSense faz o micro-ajuste fino da mira apenas inclinando o controle nas mãos.
+- **Sensação Idêntica ao PS5**: Ajuste suave sem jitter no analógico direito, permitindo acertar tiros na cabeça à distância com a precisão de um mouse.
+- Totalmente configurável no UniversalController.ini (GyroAim=1, GyroSensX=0.0035, GyroSensY=0.0035, GyroInvertY=0).
+
+---
+
+### 🔫 2. Weapon Wheel com Câmera Lenta (Segurar L1 estilo GTA V / RDR2)
+- **Bullet Time Cinematográfico**: Ao **segurar L1** por mais de 200ms, o tempo do jogo desacelera para **20% da velocidade normal**.
+- **Seleção Rápida com o Analógico Direito**: Aponte o analógico direito para escolher instantaneamente entre os 8 slots de armas principais do CJ.
+- **Feedback Háptico**: O DualSense dá um clique mecânico seco na mão a cada arma apontada na roda.
+- **Troca Instantânea**: Ao soltar o L1, o tempo volta ao normal com a arma equipada na hora!
+- **Toque Rápido no L1 (Tap < 200ms)**: Mantém o ciclo tradicional de troca de arma anterior.
+
+---
+
+### 👆 3. Gestos no Touchpad do DualSense (Swipe Gestures)
+- **Deslizar para Cima (Swipe Up)**: Atende chamadas do celular ou exibe a tela de estatísticas do CJ (equivalente à tecla TAB / Ação).
+- **Deslizar para a Direita (Swipe Right)**: Próxima estação de rádio ao dirigir.
+- **Deslizar para a Esquerda (Swipe Left)**: Estação de rádio anterior ao dirigir.
+- **Clique no Touchpad**: Abre o Mapa do jogo em tela cheia instantaneamente.
+
+---
+
+### 🚗 4. Física de Terreno & Derrapagem nos Gatilhos (R2)
+- **Burnout / Pneu Cantando em Falso**: Ao acelerar parado ou em baixa velocidade com alto RPM, o gatilho R2 trepida com vibração mecânica de alta frequência simulando o pneu patinando.
+- **Freio de Mão / Drift em Curva**: Ao puxar o freio de mão em velocidade, o gatilho R2 alivia a resistência e vibra suavemente traduzindo a perda de aderência traseira.
+- **Câmbio & Troca de Marchas**: Tranco seco mecânico no milissegundo em que a marcha engata.
+- **Freio ABS no L2**: Trepidação rápida de freio antitravamento em alta velocidade.
+- **Veículos Pesados**: Freio mais rígido e pesado em caminhões, ônibus e blindados.
+
+---
+
+### 🌊 5. Mergulho & Oxigênio Subaquático (Pressão nos Gatilhos)
+- O mod monitora a capacidade pulmonar do CJ (m_fBreath).
+- **Fôlego Baixo (< 40%)**: Os gatilhos L2 e R2 ficam rígidos e pesados, simulando a pressão da água e o esforço do mergulho.
+- **Sufocamento Iminente (< 15%)**: Pulsos violentos de batimento cardíaco nos gatilhos e motores de vibração alertando o perigo de afogamento antes de perder vida.
+
+---
+
+### 🌈 6. Lightbar Dinâmica RGB em Tempo Real
 - **Saúde Cheia (> 70%)**: Verde clássico Grove Street (#1EDC28).
 - **Saúde Média (35% - 70%)**: Amarelo/Laranja de alerta (#FF8C00).
 - **Saúde Baixa (15% - 35%)**: Vermelho de perigo (#FF1414).
 - **Saúde Crítica (< 15%)**: Batimento cardíaco pulsante em vermelho vivo.
-- **Perseguição Policial (Nível de Procurado > 0)**: Giroflex policial estroboscópico alternando em alta velocidade entre **Vermelho e Azul**, transformando o controle numa sirene física nas perseguições!
+- **Perseguição Policial (Nível de Procurado > 0)**: Giroflex policial estroboscópico alternando em alta velocidade entre **Vermelho e Azul**!
 - **Menus & Cutscenes**: Azul suave PlayStation (#0078FF).
 
 ---
 
-### ⚡ 2. Gatilhos Adaptáveis Contextuais (R2 & L2)
-- **Câmbio & Troca de Marchas (R2)**: O mod monitora a física e a transmissão dos veículos em tempo real. No milissegundo exato em que o carro troca de marcha, o gatilho de aceleração dá um tranco mecânico seco de embreagem acoplando.
-- **Freio com Sistema ABS (L2)**: Ao frear bruscamente em alta velocidade, o gatilho L2 vibra com pulsos rápidos de resistência mecânica simulando o pedal de freio trepidando contra o travamento das rodas.
-- **Veículos Pesados (Caminhões, Ônibus e Blindados)**: Resistência e peso aumentados no freio (L2) para veículos pesados como Linerunner, Tanker, Flatbed, Bus e Rhino.
-- **Cansaço e Fadiga do CJ (Stamina / Fôlego)**: Ao esgotar o fôlego correndo, nadando ou pedalando, os gatilhos L2 e R2 ficam pesados e começam a tremer, transmitindo a exaustão física do personagem diretamente para as suas mãos.
-- **Resistência por Categoria de Arma**:
-  - Pistolas e Submetralhadoras: Puxada leve com recuo mecânico rápido.
-  - Espingardas e Fuzis: Resistência progressiva firme.
-  - Armas Pesadas (Minigun, Rocket Launcher): Gatilho rígido e firme.
-
----
-
-### 🎯 3. Mira 100% Livre (Pure Free Aim) & Movimentação
-- **Mira Livre Profissional**: Remoção completa do sistema de mira magnética automática (Auto-Aim Lock-On) original do GTA SA, proporcionando controle total, suave e cirúrgico da mira pelo analógico direito.
-- **Andar e Esquivar Mirando (Move While Aiming)**: Permite que o CJ ande, corra e faça esquiva lateral mirando e disparando com qualquer arma pesada (Shotguns, M4, AK-47, Minigun, Sniper), sem o congelamento de pés original de 2004.
-- **Zoom de Precisão de Sniper no D-Pad**: Ajuste de zoom in (Seta para Cima) e zoom out (Seta para Baixo) diretamente no direcional digital enquanto mira com rifle de precisão.
-
----
-
-### 🕹️ 4. Interface, Menus & Atalhos de Navegação
-- **Navegação Cirúrgica nos Menus**: D-Pad navega perfeitamente de 1 em 1 opção, sem pular itens acidentalmente.
-- **Botão Start / Options**: Abre e fecha instantaneamente o menu de pausa / opções do jogo.
-- **Botão Share / Touchpad**: Abre diretamente a tela cheia do Mapa do jogo em qualquer momento da gameplay.
-- **Ícones Nativos de PlayStation**: Tutoriais e dicas na tela exibem os botões clássicos do PlayStation (Cruz, Quadrado, Triângulo, Círculo, L1/R1, L2/R2).
+### 🎯 7. Mira 100% Livre (Pure Free Aim) & Zoom no D-Pad
+- Mira livre desvinculada de auto-aim / lock-on magnético.
+- Andar e esquivar mirando com todas as armas pesadas.
+- Zoom de Sniper / Câmera nas setas do D-pad (Cima = Zoom In, Baixo = Zoom Out).
+- Navegação de 1 em 1 nos menus sem pular opções.
 
 ---
 
@@ -49,32 +69,24 @@ A barra de luz do DualSense e DualShock 4 reage dinamicamente aos acontecimentos
 
 | Arquivo | Descrição |
 |---|---|
-| UniversalController.c | Código-fonte completo em C (hooks de motor GTA SA, Direct HID, CRC32 e threads) |
+| UniversalController.c | Código-fonte completo em C (hooks de motor GTA SA, Direct HID, Gyro Aim, CRC32) |
 | UniversalController.asi | Binário compilado pronto para uso no ModLoader |
-| UniversalController.ini | Arquivo de configurações de sensibilidade, deadzones e eixos |
+| UniversalController.ini | Arquivo de configurações de sensibilidade, giroscópio e deadzones |
 | gamepad_tester.py | Utilitário em Python para testes de feedback háptico, gatilhos e botões |
 | mapeador_controle.py | Ferramenta visual interativa para teste e mapeamento de controles |
-| Testar_Controle.bat | Atalho de inicialização do testador |
-| Mapear_Controle.bat | Atalho de inicialização do mapeador |
 
 ---
 
 ## 💻 Instalação
 
-### Pré-requisitos
-- GTA San Andreas para PC (v1.0 US recomendada).
-- [CLEO 4](https://cleo.li/) ou [Ultimate ASI Loader](https://github.com/ThirteenAG/Ultimate-ASI-Loader).
-- [Modloader](https://github.com/thelink2012/modloader) instalado na raiz do jogo.
-- Controle PlayStation 5 DualSense ou DualShock 4 conectado via **USB** ou **Bluetooth**.
-
-### Instruções
-1. Coloque a pasta UniversalController com o arquivo UniversalController.asi e UniversalController.ini dentro do diretório modloader\ do seu GTA:
+1. Baixe o pacote **UniversalController-v3.0.0.zip** na aba de [Releases](https://github.com/carlostmj/gtasa-dualsense-mod/releases).
+2. Extraia o conteúdo na pasta raiz do seu **GTA San Andreas** (onde fica o gta_sa.exe e a pasta modloader).
+3. O mod ficará em:
    `
    GTA San Andreas\modloader\UniversalController\UniversalController.asi
    GTA San Andreas\modloader\UniversalController\UniversalController.ini
    `
-2. Inicie o jogo com o controle conectado via Bluetooth ou cabo USB.
-3. O mod detectará automaticamente o dispositivo e ativará todas as funções sem necessidade de drivers externos ou emuladores adicionais.
+4. Conecte o controle DualSense (PS5) ou DualShock 4 (PS4) via **Bluetooth** ou **USB** e jogue!
 
 ---
 
@@ -90,13 +102,8 @@ CamSensX=0.08
 CamSensY=0.06
 InvertY=0
 ControllerType=1
-`
-
----
-
-## 🛠️ Compilação
-
-Para compilar o código-fonte a partir do MinGW (GCC 32-bit):
-`ash
-i686-w64-mingw32-gcc -shared -O3 -s -o UniversalController.asi UniversalController.c -lwinmm -lsetupapi -lhid
+GyroAim=1
+GyroSensX=0.0035
+GyroSensY=0.0035
+GyroInvertY=0
 `

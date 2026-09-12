@@ -288,9 +288,13 @@ typedef struct {
     float camSensY;
     int invertY;
     int controllerType;
+    int gyroAim;
+    float gyroSensX;
+    float gyroSensY;
+    int gyroInvertY;
 } ModConfig;
 
-static ModConfig g_cfg = { 18, 20, 0.12f, 0.10f, 0, 1 };
+static ModConfig g_cfg = { 18, 20, 0.12f, 0.10f, 0, 1, 1, 0.0035f, 0.0035f, 0 };
 static FILE* g_logFile = NULL;
 
 static void LogMsg(const char* fmt, ...) {
@@ -329,7 +333,16 @@ static void LoadConfig(void) {
     GetPrivateProfileStringA("Settings", "CamSensY", "0.10", sensBuf, sizeof(sensBuf), iniPath);
     g_cfg.camSensY = (float)atof(sensBuf);
 
+    g_cfg.gyroAim = GetPrivateProfileIntA("Settings", "GyroAim", 1, iniPath);
+    g_cfg.gyroInvertY = GetPrivateProfileIntA("Settings", "GyroInvertY", 0, iniPath);
+    GetPrivateProfileStringA("Settings", "GyroSensX", "0.0035", sensBuf, sizeof(sensBuf), iniPath);
+    g_cfg.gyroSensX = (float)atof(sensBuf);
+    GetPrivateProfileStringA("Settings", "GyroSensY", "0.0035", sensBuf, sizeof(sensBuf), iniPath);
+    g_cfg.gyroSensY = (float)atof(sensBuf);
+
     LogMsg("[Config] Loaded from %s\n", iniPath);
+    LogMsg("[Config] GyroAim=%d, GyroSensX=%.4f, GyroSensY=%.4f, GyroInvertY=%d\n",
+           g_cfg.gyroAim, g_cfg.gyroSensX, g_cfg.gyroSensY, g_cfg.gyroInvertY);
     LogMsg("[Config] ControllerType=%d, DeadzoneL=%d, DeadzoneR=%d, SensX=%.3f, SensY=%.3f, InvertY=%d\n",
            g_cfg.controllerType, g_cfg.deadzoneLeft, g_cfg.deadzoneRight, g_cfg.camSensX, g_cfg.camSensY, g_cfg.invertY);
 }
@@ -386,6 +399,10 @@ typedef struct {
     BOOL btnTouch;
     BOOL btnPS;
     BOOL dpadUp, dpadDown, dpadLeft, dpadRight;
+    short gyroX, gyroY, gyroZ;
+    short accelX, accelY, accelZ;
+    BOOL touchActive;
+    int touchX, touchY;
 } DualSenseInputState;
 
 static volatile DualSenseInputState g_dsInput = { 0 };
@@ -884,6 +901,26 @@ static DWORD WINAPI DualSenseWorkerThread(LPVOID lpParam) {
                 g_dsInput.btnTouch  = (b2 & 0x02) != 0;
                 g_dsInput.btnSelect = g_dsInput.btnShare || g_dsInput.btnTouch;
 
+                // Motion Sensors (Gyroscope & Accelerometer 16-bit little-endian)
+                if (readBytes >= (DWORD)(base + 28)) {
+                    g_dsInput.gyroX  = (short)((((WORD)buf[base + 16]) << 8) | (BYTE)buf[base + 15]);
+                    g_dsInput.gyroY  = (short)((((WORD)buf[base + 18]) << 8) | (BYTE)buf[base + 17]);
+                    g_dsInput.gyroZ  = (short)((((WORD)buf[base + 20]) << 8) | (BYTE)buf[base + 19]);
+                    g_dsInput.accelX = (short)((((WORD)buf[base + 22]) << 8) | (BYTE)buf[base + 21]);
+                    g_dsInput.accelY = (short)((((WORD)buf[base + 24]) << 8) | (BYTE)buf[base + 23]);
+                    g_dsInput.accelZ = (short)((((WORD)buf[base + 26]) << 8) | (BYTE)buf[base + 25]);
+                }
+
+                // Capacitive Touchpad (1920x1080 resolution)
+                if (readBytes >= (DWORD)(base + 35)) {
+                    BYTE tHdr = buf[base + 31];
+                    g_dsInput.touchActive = ((tHdr & 0x80) == 0);
+                    g_dsInput.touchX = ((int)(buf[base + 33] & 0x0F) << 8) | (int)(BYTE)buf[base + 32];
+                    g_dsInput.touchY = ((int)(BYTE)buf[base + 34] << 4) | ((int)(buf[base + 33] & 0xF0) >> 4);
+                } else {
+                    g_dsInput.touchActive = FALSE;
+                }
+
                 g_dsInput.connected = TRUE;
             }
         } else {
@@ -1376,9 +1413,79 @@ static void ProcessCustomController(CPad* pad) {
 
             float dx = (float)gp.rx * g_cfg.camSensX;
             float dy = (float)gp.ry * (bGameInvert ? -g_cfg.camSensY : g_cfg.camSensY);
+
+            // ================================================================
+            // DUALSENSE PS5 GYRO AIMING (MIRA DE ALTA PRECISÃO POR GIROSCÓPIO)
+            // ================================================================
+            if (g_cfg.gyroAim && (gp.l2 > 30 || pad->NewState.RightShoulder1 > 0)) {
+                short gx = gp.gyroX; // Pitch (Vertical)
+                short gz = gp.gyroZ; // Yaw (Horizontal)
+
+                // Deadzone para filtrar micro-trepidações do pulso em repouso
+                int deadzone = 25;
+                if (gx > -deadzone && gx < deadzone) gx = 0;
+                else gx = (gx > 0) ? (gx - deadzone) : (gx + deadzone);
+
+                if (gz > -deadzone && gz < deadzone) gz = 0;
+                else gz = (gz > 0) ? (gz - deadzone) : (gz + deadzone);
+
+                if (gx != 0 || gz != 0) {
+                    float gyroDx = -((float)gz) * g_cfg.gyroSensX;
+                    float gyroDy = (g_cfg.gyroInvertY ? 1.0f : -1.0f) * ((float)gx) * g_cfg.gyroSensY;
+                    dx += gyroDx;
+                    dy += gyroDy;
+                }
+            }
+
             mouseState->x += dx;
             mouseState->y += dy;
         }
+    }
+
+    // ========================================================================
+    // GESTOS DO TOUCHPAD DO DUALSENSE (SWIPE GESTURES)
+    // ========================================================================
+    static BOOL s_lastTouchActive = FALSE;
+    static int s_touchStartX = 0;
+    static int s_touchStartY = 0;
+    static DWORD s_touchStartTime = 0;
+    static BOOL s_touchGestureHandled = FALSE;
+
+    if (gp.touchActive) {
+        if (!s_lastTouchActive) {
+            s_touchStartX = gp.touchX;
+            s_touchStartY = gp.touchY;
+            s_touchStartTime = now;
+            s_touchGestureHandled = FALSE;
+        } else if (!s_touchGestureHandled && (now - s_touchStartTime < 450)) {
+            int deltaX = gp.touchX - s_touchStartX;
+            int deltaY = gp.touchY - s_touchStartY;
+
+            // Swipe Up (Y diminui subindo no touchpad): Celular / Stats do CJ (Tab / Chat indicated)
+            if ((s_touchStartY - gp.touchY) > 320 && abs(deltaX) < 250) {
+                s_touchGestureHandled = TRUE;
+                pad->NewState.m_bChatIndicated = 255;
+                if (s_rumbleRight < 120) s_rumbleRight = 120;
+                if (now + 50 > s_rumbleUntil) s_rumbleUntil = now + 50;
+            }
+            // Swipe Right em veículo: Próxima estação de rádio
+            else if (deltaX > 380 && abs(deltaY) < 250 && isVehicle) {
+                s_touchGestureHandled = TRUE;
+                pad->NewState.m_bRadioTrackSkip = 1;
+                if (s_rumbleRight < 120) s_rumbleRight = 120;
+                if (now + 50 > s_rumbleUntil) s_rumbleUntil = now + 50;
+            }
+            // Swipe Left em veículo: Estação anterior
+            else if (deltaX < -380 && abs(deltaY) < 250 && isVehicle) {
+                s_touchGestureHandled = TRUE;
+                pad->NewState.m_bRadioTrackSkip = 2;
+                if (s_rumbleLeft < 120) s_rumbleLeft = 120;
+                if (now + 50 > s_rumbleUntil) s_rumbleUntil = now + 50;
+            }
+        }
+        s_lastTouchActive = TRUE;
+    } else {
+        s_lastTouchActive = FALSE;
     }
 
     // PAUSE MENU (Start / Options) - handled via startEdge above
@@ -1448,9 +1555,34 @@ static void ProcessCustomController(CPad* pad) {
                 if (now + 75 > s_rumbleUntil) s_rumbleUntil = now + 75;
             }
         } else {
-            // Desarmado / Faca / Normal: Gatilhos 100% livres e macios
+            // Desarmado / Faca / Normal: Gatilhos livres
             g_triggerR2Mode = 0x00; g_triggerR2Param1 = 0; g_triggerR2Param2 = 0;
             g_triggerL2Mode = 0x00; g_triggerL2Param1 = 0; g_triggerL2Param2 = 0;
+        }
+
+        // ====================================================================
+        // MERGULHO & OXIGÊNIO SUBAQUÁTICO (PRESSÃO E SUFOCAMENTO NOS GATILHOS)
+        // ====================================================================
+        float pedBreath = 100.0f;
+        if (pPlayerPed) {
+            pedBreath = *(float*)((BYTE*)pPlayerPed + 0x544);
+        }
+        // No GTA SA, m_fBreath fica em 100.0 em terra e diminui em mergulho subaquático
+        if (pedBreath < 40.0f && pedBreath >= 0.0f) {
+            if (pedBreath < 15.0f) {
+                // Sufocamento Crítico: Batimento cardíaco violento nos gatilhos e motores
+                BOOL suffocatePulse = ((now / 180) % 2 == 0);
+                g_triggerR2Mode = 0x01; g_triggerR2Param1 = 5; g_triggerR2Param2 = suffocatePulse ? 245 : 80;
+                g_triggerL2Mode = 0x01; g_triggerL2Param1 = 5; g_triggerL2Param2 = suffocatePulse ? 245 : 80;
+                if (suffocatePulse) {
+                    if (s_rumbleLeft < 160) s_rumbleLeft = 160;
+                    if (now + 80 > s_rumbleUntil) s_rumbleUntil = now + 80;
+                }
+            } else {
+                // Pressão da água: Gatilhos pesados e rígidos
+                g_triggerR2Mode = 0x01; g_triggerR2Param1 = 15; g_triggerR2Param2 = 180;
+                g_triggerL2Mode = 0x01; g_triggerL2Param1 = 15; g_triggerL2Param2 = 180;
+            }
         }
 
         // BOTÕES DE FACE (Preserva teclado se pressionado)
@@ -1519,10 +1651,63 @@ static void ProcessCustomController(CPad* pad) {
         if (gp.dpadLeft)  pad->NewState.DPadLeft  = 255;
         if (gp.dpadRight) pad->NewState.DPadRight = 255;
 
-        // TROCA DE ARMA RÁPIDA (L1 e R1)
+        // ====================================================================
+        // RODA DE ARMAS COM SLOW MOTION (SEGURAR L1 ESTILO GTA V / RDR2)
+        // ====================================================================
+        static DWORD s_l1PressStart = 0;
+        static BOOL s_weaponWheelActive = FALSE;
+        static int s_selectedWheelSlot = -1;
+
         if (gp.btnL1) {
-            pad->NewState.LeftShoulder2 = 255;  // Ciclo arma anterior
+            if (s_l1PressStart == 0) {
+                s_l1PressStart = now;
+            } else if (now - s_l1PressStart > 220) {
+                // Segurou L1: Ativa Bullet Time cinematográfico (20% de velocidade do jogo!)
+                s_weaponWheelActive = TRUE;
+                *(float*)0x00B7CB64 = 0.20f; // CTimer::ms_fTimeScale
+
+                // Seleciona arma pelo ângulo do analógico direito
+                float rx = (float)gp.rx;
+                float ry = (float)gp.ry;
+                float mag = sqrtf(rx * rx + ry * ry);
+                if (mag > 40.0f) {
+                    float angle = atan2f(-ry, rx);
+                    if (angle < 0) angle += 6.2831853f;
+
+                    // 8 Slots de armas principais do CJ (Slots 1 a 8)
+                    int newSlot = 1 + (int)((angle / 6.2831853f) * 8.0f) % 8;
+                    if (newSlot != s_selectedWheelSlot) {
+                        s_selectedWheelSlot = newSlot;
+                        // Clique háptico no motor direito a cada arma apontada
+                        if (s_rumbleRight < 120) s_rumbleRight = 120;
+                        if (now + 40 > s_rumbleUntil) s_rumbleUntil = now + 40;
+                    }
+                }
+            }
+        } else {
+            if (s_l1PressStart != 0) {
+                if (s_weaponWheelActive) {
+                    // Soltou L1: Restaura velocidade normal do tempo
+                    s_weaponWheelActive = FALSE;
+                    *(float*)0x00B7CB64 = 1.0f; // CTimer::ms_fTimeScale
+
+                    // Equipa a arma do slot escolhido
+                    if (pPlayerPed && s_selectedWheelSlot >= 1 && s_selectedWheelSlot <= 8) {
+                        BYTE* pPed = (BYTE*)pPlayerPed;
+                        DWORD weaponType = *(DWORD*)(pPed + 0x5A0 + s_selectedWheelSlot * 0x1C);
+                        if (weaponType > 0) {
+                            ((void(__thiscall*)(void*, int))0x005E61F0)(pPed, weaponType);
+                        }
+                    }
+                } else if (now - s_l1PressStart <= 220) {
+                    // Toque rápido (tap < 220ms): Ciclo clássico de arma anterior
+                    pad->NewState.LeftShoulder2 = 255;
+                }
+                s_l1PressStart = 0;
+                s_selectedWheelSlot = -1;
+            }
         }
+
         if (gp.btnR1) {
             pad->NewState.RightShoulder2 = 255; // Ciclo arma seguinte
         }
@@ -1619,12 +1804,31 @@ static void ProcessCustomController(CPad* pad) {
                 pad->NewState.ShockButtonL = 255;   // Campainha da bike
             }
         } else {
-            // R2 (Aceleração):
+            // R2 (Aceleração & Feedback de Tração / Burnout / Derrapagem):
+            BOOL isBurnout = (gp.r2 > 90 && speedSq < 0.025f && vehHealth > 300.0f && !isBicycle);
+            BOOL isHandbrakeDrift = (gp.btnCross && speedSq > 0.04f && !isBicycle);
+
             if (now < s_gearSnapUntil) {
                 // Snap mecânico de troca de marcha no R2!
                 g_triggerR2Mode = 0x02; // Rigid Stop
                 g_triggerR2Param1 = 10;
                 g_triggerR2Param2 = 230;
+            } else if (isBurnout) {
+                // Cantando pneu / Pneu patinando em falso: Trepidação de alta rotação no R2
+                BOOL buzz = ((now / 40) % 2 == 0);
+                g_triggerR2Mode = 0x01; // Vibration Mode
+                g_triggerR2Param1 = 5;
+                g_triggerR2Param2 = buzz ? 190 : 80;
+                if (s_rumbleRight < 110) s_rumbleRight = 110;
+                if (now + 50 > s_rumbleUntil) s_rumbleUntil = now + 50;
+            } else if (isHandbrakeDrift) {
+                // Puxou freio de mão em curva (Drift): R2 perde resistência e treme suave
+                BOOL buzz = ((now / 60) % 2 == 0);
+                g_triggerR2Mode = 0x01;
+                g_triggerR2Param1 = 8;
+                g_triggerR2Param2 = buzz ? 140 : 40;
+                if (s_rumbleLeft < 130) s_rumbleLeft = 130;
+                if (now + 60 > s_rumbleUntil) s_rumbleUntil = now + 60;
             } else {
                 // Aceleração suave e progressiva
                 g_triggerR2Mode = 0x00;
