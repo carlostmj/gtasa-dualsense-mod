@@ -238,9 +238,10 @@ static BOOL __attribute__((thiscall)) Hooked_ControlGunMove(void* thisTask, cons
 }
 
 static void EnsureMoveWhileAiming(void) {
-    static BOOL s_applied = FALSE;
-    if (s_applied) return; // Aplica apenas UMA vez na inicialização de forma segura!
-    s_applied = TRUE;
+    static DWORD s_lastCheck = 0;
+    DWORD now = GetTickCount();
+    if (now - s_lastCheck < 1000) return; // Verifica a cada 1 segundo
+    s_lastCheck = now;
 
     DWORD oldProtect;
     if (VirtualProtect((LPVOID)0x00C8AAB8, 80 * 0x70, PAGE_EXECUTE_READWRITE, &oldProtect)) {
@@ -250,28 +251,29 @@ static void EnsureMoveWhileAiming(void) {
             DWORD* pFlags = (DWORD*)(pWInfo + 0x18);
             float* pMoveSpeed = (float*)(pWInfo + 0x3C);
 
-            // Modifica apenas armas de fogo válidas (evita corromper melee, punhos e pickups)
-            if (modelId >= 342 && modelId <= 372) {
-                *pFlags |= 0x31; // bCanAim | bMoveAim | bMoveFire
+            // Ativa: bCanAim (0x01) | bMoveAim (0x10) | bMoveFire (0x20)
+            *pFlags |= 0x31;
 
-                // NÃO remove b1stPerson de armas com mira telescópica ou câmera
-                if (modelId == 358 || modelId == 359 || modelId == 360 || modelId == 367) {
-                    *pFlags |= 0x04;
-                } else {
-                    *pFlags &= ~0x04;
-                }
+            // NÃO remove b1stPerson de armas com mira telescópica ou câmera (Sniper 358, RPG 359, Heatseeker 360, Câmera 367)
+            if (modelId == 358 || modelId == 359 || modelId == 360 || modelId == 367) {
+                *pFlags |= 0x04; // Mantém o Scope telescópico da Sniper e RPG com retícula e zoom 100% funcionais!
+            } else {
+                *pFlags &= ~0x04; // Armas convencionais usam mira livre em 3ª pessoa sobre o ombro
+            }
 
-                if (modelId != 346 && modelId != 350 && modelId != 352 && modelId != 372 && modelId != 358) {
-                    *pFlags &= ~0x02;
-                }
+            // Armas pesadas e rifles de duas mãos (M4, AK-47, Shotguns, MP5, etc.)
+            // NÃO podem ter bAimWithArm (0x02), senão a engine não chama PlayerControlZeldaWeapon!
+            // Somente armas de uma mão e a Sniper mantêm suas configurações originais.
+            if (modelId != 346 && modelId != 350 && modelId != 352 && modelId != 372 && modelId != 358) {
+                *pFlags &= ~0x02;
+            }
 
-                if (*pMoveSpeed < 0.85f) {
-                    *pMoveSpeed = 0.85f;
-                }
+            // Garante velocidade de movimento para a animação mover o personagem
+            if (*pMoveSpeed < 0.85f) {
+                *pMoveSpeed = 0.85f;
             }
         }
         VirtualProtect((LPVOID)0x00C8AAB8, 80 * 0x70, oldProtect, &oldProtect);
-        LogMsg("[MoveWhileAim] Safely initialized firearm flags.\n");
     }
 }
 
@@ -286,13 +288,9 @@ typedef struct {
     float camSensY;
     int invertY;
     int controllerType;
-    int gyroAim;
-    float gyroSensX;
-    float gyroSensY;
-    int gyroInvertY;
 } ModConfig;
 
-static ModConfig g_cfg = { 18, 20, 0.12f, 0.10f, 0, 1, 1, 0.0035f, 0.0035f, 0 };
+static ModConfig g_cfg = { 18, 20, 0.12f, 0.10f, 0, 1 };
 static FILE* g_logFile = NULL;
 
 static void LogMsg(const char* fmt, ...) {
@@ -331,16 +329,7 @@ static void LoadConfig(void) {
     GetPrivateProfileStringA("Settings", "CamSensY", "0.10", sensBuf, sizeof(sensBuf), iniPath);
     g_cfg.camSensY = (float)atof(sensBuf);
 
-    g_cfg.gyroAim = GetPrivateProfileIntA("Settings", "GyroAim", 1, iniPath);
-    g_cfg.gyroInvertY = GetPrivateProfileIntA("Settings", "GyroInvertY", 0, iniPath);
-    GetPrivateProfileStringA("Settings", "GyroSensX", "0.0035", sensBuf, sizeof(sensBuf), iniPath);
-    g_cfg.gyroSensX = (float)atof(sensBuf);
-    GetPrivateProfileStringA("Settings", "GyroSensY", "0.0035", sensBuf, sizeof(sensBuf), iniPath);
-    g_cfg.gyroSensY = (float)atof(sensBuf);
-
     LogMsg("[Config] Loaded from %s\n", iniPath);
-    LogMsg("[Config] GyroAim=%d, GyroSensX=%.4f, GyroSensY=%.4f, GyroInvertY=%d\n",
-           g_cfg.gyroAim, g_cfg.gyroSensX, g_cfg.gyroSensY, g_cfg.gyroInvertY);
     LogMsg("[Config] ControllerType=%d, DeadzoneL=%d, DeadzoneR=%d, SensX=%.3f, SensY=%.3f, InvertY=%d\n",
            g_cfg.controllerType, g_cfg.deadzoneLeft, g_cfg.deadzoneRight, g_cfg.camSensX, g_cfg.camSensY, g_cfg.invertY);
 }
@@ -397,10 +386,6 @@ typedef struct {
     BOOL btnTouch;
     BOOL btnPS;
     BOOL dpadUp, dpadDown, dpadLeft, dpadRight;
-    short gyroX, gyroY, gyroZ;
-    short accelX, accelY, accelZ;
-    BOOL touchActive;
-    int touchX, touchY;
 } DualSenseInputState;
 
 static volatile DualSenseInputState g_dsInput = { 0 };
@@ -795,14 +780,10 @@ static DWORD WINAPI DualSenseWorkerThread(LPVOID lpParam) {
                     g_dsInput.btnTriangle = (b0 & 0x80) != 0;
 
                     BYTE dpad = b0 & 0x0F;
-                    if (dpad <= 7) {
-                        g_dsInput.dpadUp    = (dpad == 0 || dpad == 1 || dpad == 7);
-                        g_dsInput.dpadRight = (dpad == 1 || dpad == 2 || dpad == 3);
-                        g_dsInput.dpadDown  = (dpad == 3 || dpad == 4 || dpad == 5);
-                        g_dsInput.dpadLeft  = (dpad == 5 || dpad == 6 || dpad == 7);
-                    } else {
-                        g_dsInput.dpadUp = g_dsInput.dpadRight = g_dsInput.dpadDown = g_dsInput.dpadLeft = FALSE;
-                    }
+                    g_dsInput.dpadUp    = (dpad == 0 || dpad == 1 || dpad == 7);
+                    g_dsInput.dpadRight = (dpad == 1 || dpad == 2 || dpad == 3);
+                    g_dsInput.dpadDown  = (dpad == 3 || dpad == 4 || dpad == 5);
+                    g_dsInput.dpadLeft  = (dpad == 5 || dpad == 6 || dpad == 7);
 
                     BYTE b1 = buf[8];
                     g_dsInput.btnL1     = (b1 & 0x01) != 0;
@@ -839,14 +820,10 @@ static DWORD WINAPI DualSenseWorkerThread(LPVOID lpParam) {
                     g_dsInput.btnTriangle = (b0 & 0x80) != 0;
 
                     BYTE dpad = b0 & 0x0F;
-                    if (dpad <= 7) {
-                        g_dsInput.dpadUp    = (dpad == 0 || dpad == 1 || dpad == 7);
-                        g_dsInput.dpadRight = (dpad == 1 || dpad == 2 || dpad == 3);
-                        g_dsInput.dpadDown  = (dpad == 3 || dpad == 4 || dpad == 5);
-                        g_dsInput.dpadLeft  = (dpad == 5 || dpad == 6 || dpad == 7);
-                    } else {
-                        g_dsInput.dpadUp = g_dsInput.dpadRight = g_dsInput.dpadDown = g_dsInput.dpadLeft = FALSE;
-                    }
+                    g_dsInput.dpadUp    = (dpad == 0 || dpad == 1 || dpad == 7);
+                    g_dsInput.dpadRight = (dpad == 1 || dpad == 2 || dpad == 3);
+                    g_dsInput.dpadDown  = (dpad == 3 || dpad == 4 || dpad == 5);
+                    g_dsInput.dpadLeft  = (dpad == 5 || dpad == 6 || dpad == 7);
 
                     BYTE b1 = buf[base + 5];
                     g_dsInput.btnL1     = (b1 & 0x01) != 0;
@@ -870,11 +847,7 @@ static DWORD WINAPI DualSenseWorkerThread(LPVOID lpParam) {
                 }
             } else {
                 // DualSense PS5 parsing (Report 0x31 BT or 0x01 USB)
-                if (buf[0] != 0x01 && buf[0] != 0x31) {
-                    continue;
-                }
-
-                int base = (buf[0] == 0x31) ? 3 : 1;
+                int base = (buf[0] == 0x31) ? 2 : 1;
                 g_sonyIsBluetooth = (buf[0] == 0x31);
 
                 g_dsInput.lx = (short)((int)buf[base + 0] - 128);
@@ -891,14 +864,10 @@ static DWORD WINAPI DualSenseWorkerThread(LPVOID lpParam) {
                 g_dsInput.btnTriangle = (b0 & 0x80) != 0;
 
                 BYTE dpad = b0 & 0x0F;
-                if (dpad <= 7) {
-                    g_dsInput.dpadUp    = (dpad == 0 || dpad == 1 || dpad == 7);
-                    g_dsInput.dpadRight = (dpad == 1 || dpad == 2 || dpad == 3);
-                    g_dsInput.dpadDown  = (dpad == 3 || dpad == 4 || dpad == 5);
-                    g_dsInput.dpadLeft  = (dpad == 5 || dpad == 6 || dpad == 7);
-                } else {
-                    g_dsInput.dpadUp = g_dsInput.dpadRight = g_dsInput.dpadDown = g_dsInput.dpadLeft = FALSE;
-                }
+                g_dsInput.dpadUp    = (dpad == 0 || dpad == 1 || dpad == 7);
+                g_dsInput.dpadRight = (dpad == 1 || dpad == 2 || dpad == 3);
+                g_dsInput.dpadDown  = (dpad == 3 || dpad == 4 || dpad == 5);
+                g_dsInput.dpadLeft  = (dpad == 5 || dpad == 6 || dpad == 7);
 
                 BYTE b1 = buf[base + 8];
                 g_dsInput.btnL1     = (b1 & 0x01) != 0;
@@ -914,26 +883,6 @@ static DWORD WINAPI DualSenseWorkerThread(LPVOID lpParam) {
                 g_dsInput.btnPS     = (b2 & 0x01) != 0;
                 g_dsInput.btnTouch  = (b2 & 0x02) != 0;
                 g_dsInput.btnSelect = g_dsInput.btnShare || g_dsInput.btnTouch;
-
-                // Motion Sensors (Gyroscope & Accelerometer 16-bit little-endian)
-                if (readBytes >= (DWORD)(base + 28)) {
-                    g_dsInput.gyroX  = (short)((((WORD)buf[base + 16]) << 8) | (BYTE)buf[base + 15]);
-                    g_dsInput.gyroY  = (short)((((WORD)buf[base + 18]) << 8) | (BYTE)buf[base + 17]);
-                    g_dsInput.gyroZ  = (short)((((WORD)buf[base + 20]) << 8) | (BYTE)buf[base + 19]);
-                    g_dsInput.accelX = (short)((((WORD)buf[base + 22]) << 8) | (BYTE)buf[base + 21]);
-                    g_dsInput.accelY = (short)((((WORD)buf[base + 24]) << 8) | (BYTE)buf[base + 23]);
-                    g_dsInput.accelZ = (short)((((WORD)buf[base + 26]) << 8) | (BYTE)buf[base + 25]);
-                }
-
-                // Capacitive Touchpad (1920x1080 resolution)
-                if (readBytes >= (DWORD)(base + 35)) {
-                    BYTE tHdr = buf[base + 31];
-                    g_dsInput.touchActive = ((tHdr & 0x80) == 0);
-                    g_dsInput.touchX = ((int)(buf[base + 33] & 0x0F) << 8) | (int)(BYTE)buf[base + 32];
-                    g_dsInput.touchY = ((int)(BYTE)buf[base + 34] << 4) | ((int)(buf[base + 33] & 0xF0) >> 4);
-                } else {
-                    g_dsInput.touchActive = FALSE;
-                }
 
                 g_dsInput.connected = TRUE;
             }
@@ -1057,55 +1006,34 @@ static BOOL PollDirectInput(DualSenseInputState* outState) {
             short rx = (short)(((int)jie.dwZpos - 32768) / 256);
             short ry = (short)(((int)jie.dwRpos - 32768) / 256);
 
+            // Filter phantom zeroed devices
+            if (jie.dwButtons == 0 && abs(lx) < 2 && abs(ly) < 2 && abs(rx) < 2 && abs(ry) < 2 && jie.dwPOV == 0xFFFF) {
+                continue;
+            }
+
             outState->connected = TRUE;
             outState->lx = lx;
             outState->ly = ly;
             outState->rx = rx;
             outState->ry = ry;
-
-            // Calibração perfeita de L2 e R2 analógicos no DirectInput do Windows
-            BYTE l2 = 0;
-            if (jie.dwUpos > 33000) {
-                l2 = (BYTE)(((jie.dwUpos - 32768) * 255) / 32767);
-            } else if (jie.dwButtons & (1 << 6)) {
-                l2 = 255;
-            }
-            outState->l2 = l2;
-
-            BYTE r2 = 0;
-            if (jie.dwVpos > 33000) {
-                r2 = (BYTE)(((jie.dwVpos - 32768) * 255) / 32767);
-            } else if (jie.dwButtons & (1 << 7)) {
-                r2 = 255;
-            }
-            outState->r2 = r2;
-
-            // Mapeamento 100% oficial e preciso do DualSense / DualShock no Windows
-            outState->btnCross    = (jie.dwButtons & (1 << 0)) != 0; // X
-            outState->btnCircle   = (jie.dwButtons & (1 << 1)) != 0; // Círculo (Soco)
-            outState->btnSquare   = (jie.dwButtons & (1 << 2)) != 0; // Quadrado (Pulo)
-            outState->btnTriangle = (jie.dwButtons & (1 << 3)) != 0; // Triângulo (Entrar/Sair)
-            outState->btnL1       = (jie.dwButtons & (1 << 4)) != 0; // L1 (Troca arma ant.)
-            outState->btnR1       = (jie.dwButtons & (1 << 5)) != 0; // R1 (Troca arma seg.)
-            outState->btnShare    = (jie.dwButtons & (1 << 8)) != 0; // Create / Share
-            outState->btnStart    = (jie.dwButtons & (1 << 9)) != 0; // Options / Start / Play
-            outState->btnL3       = (jie.dwButtons & (1 << 10)) != 0;// L3 (Agachar)
-            outState->btnR3       = (jie.dwButtons & (1 << 11)) != 0;// R3 (Olhar trás)
-            outState->btnPS       = (jie.dwButtons & (1 << 12)) != 0;// Botão PS
-            outState->btnTouch    = (jie.dwButtons & (1 << 13)) != 0;// Touchpad Click
-            outState->btnSelect   = outState->btnShare || outState->btnTouch;
-
-            // D-Pad do Windows POV Hat (65535 = Nenhum direcional pressionado)
-            if (jie.dwPOV != 0xFFFF && jie.dwPOV <= 35900) {
+            outState->l2 = (BYTE)(jie.dwUpos / 257);
+            outState->r2 = (BYTE)(jie.dwVpos / 257);
+            outState->btnCross    = (jie.dwButtons & (1 << 0)) != 0;
+            outState->btnCircle   = (jie.dwButtons & (1 << 1)) != 0;
+            outState->btnSquare   = (jie.dwButtons & (1 << 2)) != 0;
+            outState->btnTriangle = (jie.dwButtons & (1 << 3)) != 0;
+            outState->btnL1       = (jie.dwButtons & (1 << 4)) != 0;
+            outState->btnR1       = (jie.dwButtons & (1 << 5)) != 0;
+            outState->btnShare    = (jie.dwButtons & (1 << 8)) != 0;
+            outState->btnStart    = (jie.dwButtons & (1 << 9)) != 0;
+            outState->btnL3       = (jie.dwButtons & (1 << 10)) != 0;
+            outState->btnR3       = (jie.dwButtons & (1 << 11)) != 0;
+            outState->btnSelect   = outState->btnShare;
+            if (jie.dwPOV != 0xFFFF) {
                 outState->dpadUp    = (jie.dwPOV == 0    || jie.dwPOV == 4500  || jie.dwPOV == 31500);
                 outState->dpadRight = (jie.dwPOV == 4500 || jie.dwPOV == 9000  || jie.dwPOV == 13500);
                 outState->dpadDown  = (jie.dwPOV == 13500|| jie.dwPOV == 18000 || jie.dwPOV == 22500);
                 outState->dpadLeft  = (jie.dwPOV == 22500|| jie.dwPOV == 27000 || jie.dwPOV == 31500);
-            } else {
-                outState->dpadUp = FALSE;
-                outState->dpadRight = FALSE;
-                outState->dpadDown = FALSE;
-                outState->dpadLeft = FALSE;
             }
             return TRUE;
         }
@@ -1168,35 +1096,20 @@ static void ProcessCustomController(CPad* pad) {
     DualSenseInputState gp = { 0 };
 
     // Multi-tier Universal Detection:
-    // 1. DirectInput / WinMM (Método padrão, 100% calibrado pelo Windows para botões e analógicos)
-    if (PollDirectInput(&gp)) {
-        // Sobrepõe dados avançados do giroscópio e gatilhos do DualSense se disponíveis
-        if (g_dsInput.connected) {
-            gp.gyroX = g_dsInput.gyroX;
-            gp.gyroY = g_dsInput.gyroY;
-            gp.gyroZ = g_dsInput.gyroZ;
-            gp.accelX = g_dsInput.accelX;
-            gp.accelY = g_dsInput.accelY;
-            gp.accelZ = g_dsInput.accelZ;
-            if (g_dsInput.touchActive) {
-                gp.touchActive = TRUE;
-                gp.touchX = g_dsInput.touchX;
-                gp.touchY = g_dsInput.touchY;
-            }
-            if (g_dsInput.l2 > gp.l2 && g_dsInput.l2 > 25) gp.l2 = g_dsInput.l2;
-            if (g_dsInput.r2 > gp.r2 && g_dsInput.r2 > 25) gp.r2 = g_dsInput.r2;
-        }
+    // 1. Native Sony HID (DualSense PS5, DualShock 4)
+    if (g_dsInput.connected) {
+        gp = g_dsInput;
     }
     // 2. XInput (Xbox, DS4Windows, Steam Input, DualSenseX)
     else if (PollXInput(&gp)) {
         // Active via XInput
     }
-    // 3. Fallback para HID puro
-    else if (g_dsInput.connected) {
-        gp = g_dsInput;
+    // 3. DirectInput (Generic USB gamepads)
+    else if (PollDirectInput(&gp)) {
+        // Active via DirectInput
     }
     else {
-        return; // Nenhum controle conectado
+        return; // No controller connected
     }
 
     DWORD now = GetTickCount();
@@ -1300,43 +1213,45 @@ static void ProcessCustomController(CPad* pad) {
 
     // START (Options / Play) -> Alterna entre o Menu Principal de Opções e o Jogo
     if (startEdge) {
+        LogMsg("[Menu] START pressed! Active=%d, Page=%d\n", isMenuActive, curMenuPage);
         if (!isMenuActive) {
             *(BYTE*)0x00BA677B = 1; // m_bStartUpFrontEndRequested = true (Abre Menu)
             *(char*)0x00BA68A5 = 0; // m_nCurrentMenuPage = 0 (Opções)
-            *(BYTE*)0x00BA67A1 = 0;
         } else {
             *(BYTE*)0x00BA677A = 1; // m_bShutDownFrontEndRequested = true (Fecha Menu)
         }
         pad->NewState.Start = 255;
     }
 
-    // SHARE (Create / Touchpad) -> Abre/Fecha diretamente o Mapa do Jogo
+    // SHARE (Create / Touchpad) -> Abre diretamente o Mapa do Jogo
     if (shareEdge) {
+        LogMsg("[Menu] SHARE/TOUCHPAD pressed! Active=%d, Page=%d\n", isMenuActive, curMenuPage);
         if (!isMenuActive) {
             *(BYTE*)0x00BA677B = 1; // m_bStartUpFrontEndRequested = true
-            *(char*)0x00BA68A5 = 41; // m_nCurrentMenuPage = 41 (Mapa no GTA SA!)
-            *(BYTE*)0x00BA67A1 = 1;  // m_bDrawRadarOrMap = true
+            *(char*)0x00BA68A5 = 5; // m_nCurrentMenuPage = 5 (Mapa Direto)
+            *(BYTE*)0x00BA67A1 = 1; // m_bDrawRadarOrMap = true
         } else {
-            *(BYTE*)0x00BA677A = 1; // Fecha o mapa/menu e volta ao jogo
+            if (curMenuPage == 5) {
+                *(BYTE*)0x00BA677A = 1; // Fecha o mapa e volta ao jogo
+            } else {
+                *(char*)0x00BA68A5 = 5; // Pula de outra aba direto para o Mapa
+                *(BYTE*)0x00BA67A1 = 1;
+            }
         }
     }
 
-    // ========================================================================
-    // CONTROLES DO MAPA (Página 41 ou m_bDrawRadarOrMap ativo)
-    // ========================================================================
-    BOOL isMapScreen = (isMenuActive && (curMenuPage == 41 || *(BYTE*)0x00BA67A1 != 0));
-    if (isMapScreen) {
+    // MAP PAGE CONTROLS (Page 5)
+    if (isMenuActive && curMenuPage == 5) {
         float* pMapX = (float*)ADDR_MAP_BASE_X;
         float* pMapY = (float*)ADDR_MAP_BASE_Y;
-        if (pMapX && pMapY) {
-            // Deadzone de 25 para evitar que ruído mova o mapa sozinho
-            if (abs(gp.lx) > 25) *pMapX += ((float)gp.lx / 128.0f) * 12.0f;
-            if (abs(gp.ly) > 25) *pMapY += ((float)gp.ly / 128.0f) * 12.0f;
+        if (pMapX && pMapY && (gp.lx != 0 || gp.ly != 0)) {
+            *pMapX += ((float)gp.lx / 128.0f) * 14.0f;
+            *pMapY += ((float)gp.ly / 128.0f) * 14.0f;
         }
         float* pZoom = (float*)ADDR_MAP_ZOOM;
         if (pZoom) {
-            if (gp.r2 > 50 || gp.btnR1) *pZoom += 0.012f;
-            if (gp.l2 > 50 || gp.btnL1) *pZoom -= 0.012f;
+            if (gp.r2 > 50 || gp.btnR1) *pZoom += 0.015f;
+            if (gp.l2 > 50 || gp.btnL1) *pZoom -= 0.015f;
             if (*pZoom < 0.2f) *pZoom = 0.2f;
             if (*pZoom > 8.0f) *pZoom = 8.0f;
         }
@@ -1348,36 +1263,20 @@ static void ProcessCustomController(CPad* pad) {
     if (isMenuActive != 0) {
         g_triggerR2Mode = 0; g_triggerR2Param1 = 0; g_triggerR2Param2 = 0;
         g_triggerL2Mode = 0; g_triggerL2Param1 = 0; g_triggerL2Param2 = 0;
-
-        // Se estiver na tela do Mapa, botões Circle ou Triangle fecham o mapa
-        if (isMapScreen) {
-            static BOOL s_lastMapBack = FALSE;
-            if ((gp.btnCircle || gp.btnTriangle) && !s_lastMapBack) {
-                *(BYTE*)0x00BA677A = 1; // Fecha o mapa e volta ao jogo
-            }
-            s_lastMapBack = (gp.btnCircle || gp.btnTriangle);
-
-            // Silencia vibração no mapa
-            s_customSniperZoomIn = false;
-            s_customSniperZoomOut = false;
-            g_targetLeftMotor = 0;
-            g_targetRightMotor = 0;
-            return; // Não envia comandos de lista para a tela do mapa!
-        }
-
+        
         // Mantém suporte para fechar o menu com Start
         if (gp.btnStart) pad->NewState.Start = 255;
 
         // Navegação precisa de itens do Menu via CMenuManager::ProcessUserInput
-        // Deadzone segura (85) para garantir que analógico em repouso nunca mova o menu!
+        // NOTA: Não escrevemos em pad->NewState.DPad* para evitar pulo duplo de opções nos submenus!
         static DWORD s_nextNavRepeat = 0;
         static int s_activeDir = 0;
 
         int curDir = 0;
-        if (gp.dpadUp || gp.ly < -85) curDir = 1;       // CIMA
-        else if (gp.dpadDown || gp.ly > 85) curDir = 2; // BAIXO
-        else if (gp.dpadLeft || gp.lx < -85) curDir = 3;// ESQUERDA
-        else if (gp.dpadRight || gp.lx > 85) curDir = 4;// DIREITA
+        if (gp.dpadUp || gp.ly < -60) curDir = 1;       // CIMA
+        else if (gp.dpadDown || gp.ly > 60) curDir = 2; // BAIXO
+        else if (gp.dpadLeft || gp.lx < -60) curDir = 3;// ESQUERDA
+        else if (gp.dpadRight || gp.lx > 60) curDir = 4;// DIREITA
 
         char down = 0, up = 0, input = 0;
         if (curDir != 0) {
@@ -1389,7 +1288,7 @@ static void ProcessCustomController(CPad* pad) {
                 else if (curDir == 3) input = -1;// ESQUERDA -> slider / opção anterior
                 else if (curDir == 4) input = 1; // DIREITA -> slider / próxima opção
             } else if (now >= s_nextNavRepeat) {
-                s_nextNavRepeat = now + 180;     // Taxa de repetição contínua (180ms) ao segurar
+                s_nextNavRepeat = now + 160;     // Taxa de repetição contínua (160ms) ao segurar
                 if (curDir == 1) up = 1;
                 else if (curDir == 2) down = 1;
                 else if (curDir == 3) input = -1;
@@ -1427,7 +1326,8 @@ static void ProcessCustomController(CPad* pad) {
     // 1. Inicializa os icones de botoes PS5 a partir de models\ps3btns.txd
     InitPS5Buttons();
 
-    // 2. Armas configuradas na inicialização (EnsureMoveWhileAiming)
+    // 2. Garante que todas as 80 armas tenham bMoveAim e bMoveFire (andar e esquivar mirando/atirando)
+    EnsureMoveWhileAiming();
 
     // 3. Mantém suporte simultâneo a Teclado + Mouse e Controle
     *(BYTE*)0x00B6EC2E = 1;            // CCamera::m_bUseMouse3rdPerson: 1 = Câmera livre do mouse sempre ativa
@@ -1476,79 +1376,9 @@ static void ProcessCustomController(CPad* pad) {
 
             float dx = (float)gp.rx * g_cfg.camSensX;
             float dy = (float)gp.ry * (bGameInvert ? -g_cfg.camSensY : g_cfg.camSensY);
-
-            // ================================================================
-            // DUALSENSE PS5 GYRO AIMING (MIRA DE ALTA PRECISÃO POR GIROSCÓPIO)
-            // ================================================================
-            if (g_cfg.gyroAim && (gp.l2 > 30 || pad->NewState.RightShoulder1 > 0)) {
-                short gx = gp.gyroX; // Pitch (Vertical)
-                short gz = gp.gyroZ; // Yaw (Horizontal)
-
-                // Deadzone para filtrar micro-trepidações do pulso em repouso
-                int deadzone = 25;
-                if (gx > -deadzone && gx < deadzone) gx = 0;
-                else gx = (gx > 0) ? (gx - deadzone) : (gx + deadzone);
-
-                if (gz > -deadzone && gz < deadzone) gz = 0;
-                else gz = (gz > 0) ? (gz - deadzone) : (gz + deadzone);
-
-                if (gx != 0 || gz != 0) {
-                    float gyroDx = -((float)gz) * g_cfg.gyroSensX;
-                    float gyroDy = (g_cfg.gyroInvertY ? 1.0f : -1.0f) * ((float)gx) * g_cfg.gyroSensY;
-                    dx += gyroDx;
-                    dy += gyroDy;
-                }
-            }
-
             mouseState->x += dx;
             mouseState->y += dy;
         }
-    }
-
-    // ========================================================================
-    // GESTOS DO TOUCHPAD DO DUALSENSE (SWIPE GESTURES)
-    // ========================================================================
-    static BOOL s_lastTouchActive = FALSE;
-    static int s_touchStartX = 0;
-    static int s_touchStartY = 0;
-    static DWORD s_touchStartTime = 0;
-    static BOOL s_touchGestureHandled = FALSE;
-
-    if (gp.touchActive) {
-        if (!s_lastTouchActive) {
-            s_touchStartX = gp.touchX;
-            s_touchStartY = gp.touchY;
-            s_touchStartTime = now;
-            s_touchGestureHandled = FALSE;
-        } else if (!s_touchGestureHandled && (now - s_touchStartTime < 450)) {
-            int deltaX = gp.touchX - s_touchStartX;
-            int deltaY = gp.touchY - s_touchStartY;
-
-            // Swipe Up (Y diminui subindo no touchpad): Celular / Stats do CJ (Tab / Chat indicated)
-            if ((s_touchStartY - gp.touchY) > 320 && abs(deltaX) < 250) {
-                s_touchGestureHandled = TRUE;
-                pad->NewState.m_bChatIndicated = 255;
-                if (s_rumbleRight < 120) s_rumbleRight = 120;
-                if (now + 50 > s_rumbleUntil) s_rumbleUntil = now + 50;
-            }
-            // Swipe Right em veículo: Próxima estação de rádio
-            else if (deltaX > 380 && abs(deltaY) < 250 && isVehicle) {
-                s_touchGestureHandled = TRUE;
-                pad->NewState.m_bRadioTrackSkip = 1;
-                if (s_rumbleRight < 120) s_rumbleRight = 120;
-                if (now + 50 > s_rumbleUntil) s_rumbleUntil = now + 50;
-            }
-            // Swipe Left em veículo: Estação anterior
-            else if (deltaX < -380 && abs(deltaY) < 250 && isVehicle) {
-                s_touchGestureHandled = TRUE;
-                pad->NewState.m_bRadioTrackSkip = 2;
-                if (s_rumbleLeft < 120) s_rumbleLeft = 120;
-                if (now + 50 > s_rumbleUntil) s_rumbleUntil = now + 50;
-            }
-        }
-        s_lastTouchActive = TRUE;
-    } else {
-        s_lastTouchActive = FALSE;
     }
 
     // PAUSE MENU (Start / Options) - handled via startEdge above
@@ -1577,8 +1407,15 @@ static void ProcessCustomController(CPad* pad) {
             pad->NewState.ButtonCircle = 255;
         }
 
-        // 100% Mira Livre (Free Aim): CPlayerPed::FindWeaponLockOnTarget foi patcheado
-        // nativamente com 'xor eax, eax; ret' no motor do jogo, eliminando auto-aim e cones 3D.
+        // REMOVE 100% A MIRA AUTOMÁTICA (Sem cones/triângulos verdes girando e sem lock-on)
+        // Garante que CJ nunca trave mira em pedestres e a câmera nunca fique presa
+        void* pPlayer = FUNC_FindPlayerPed(-1);
+        if (pPlayer) {
+            void* pTarget = *(void**)((BYTE*)pPlayer + 0x79C);
+            if (pTarget) {
+                ((void (__attribute__((thiscall)) *)(void*))0x0060D5A0)(pPlayer); // ClearWeaponTarget
+            }
+        }
 
         // --------------------------------------------------------------------
         // GATILHOS ADAPTÁVEIS A PÉ:
@@ -1611,34 +1448,9 @@ static void ProcessCustomController(CPad* pad) {
                 if (now + 75 > s_rumbleUntil) s_rumbleUntil = now + 75;
             }
         } else {
-            // Desarmado / Faca / Normal: Gatilhos livres
+            // Desarmado / Faca / Normal: Gatilhos 100% livres e macios
             g_triggerR2Mode = 0x00; g_triggerR2Param1 = 0; g_triggerR2Param2 = 0;
             g_triggerL2Mode = 0x00; g_triggerL2Param1 = 0; g_triggerL2Param2 = 0;
-        }
-
-        // ====================================================================
-        // MERGULHO & OXIGÊNIO SUBAQUÁTICO (PRESSÃO E SUFOCAMENTO NOS GATILHOS)
-        // ====================================================================
-        float pedBreath = 100.0f;
-        if (pPlayerPed) {
-            pedBreath = *(float*)((BYTE*)pPlayerPed + 0x544);
-        }
-        // No GTA SA, m_fBreath fica em 100.0 em terra e diminui em mergulho subaquático
-        if (pedBreath < 40.0f && pedBreath >= 0.0f) {
-            if (pedBreath < 15.0f) {
-                // Sufocamento Crítico: Batimento cardíaco violento nos gatilhos e motores
-                BOOL suffocatePulse = ((now / 180) % 2 == 0);
-                g_triggerR2Mode = 0x01; g_triggerR2Param1 = 5; g_triggerR2Param2 = suffocatePulse ? 245 : 80;
-                g_triggerL2Mode = 0x01; g_triggerL2Param1 = 5; g_triggerL2Param2 = suffocatePulse ? 245 : 80;
-                if (suffocatePulse) {
-                    if (s_rumbleLeft < 160) s_rumbleLeft = 160;
-                    if (now + 80 > s_rumbleUntil) s_rumbleUntil = now + 80;
-                }
-            } else {
-                // Pressão da água: Gatilhos pesados e rígidos
-                g_triggerR2Mode = 0x01; g_triggerR2Param1 = 15; g_triggerR2Param2 = 180;
-                g_triggerL2Mode = 0x01; g_triggerL2Param1 = 15; g_triggerL2Param2 = 180;
-            }
         }
 
         // BOTÕES DE FACE (Preserva teclado se pressionado)
@@ -1707,9 +1519,7 @@ static void ProcessCustomController(CPad* pad) {
         if (gp.dpadLeft)  pad->NewState.DPadLeft  = 255;
         if (gp.dpadRight) pad->NewState.DPadRight = 255;
 
-        // ====================================================================
         // TROCA DE ARMA RÁPIDA (L1 e R1)
-        // ====================================================================
         if (gp.btnL1) {
             pad->NewState.LeftShoulder2 = 255;  // Ciclo arma anterior
         }
@@ -1809,31 +1619,12 @@ static void ProcessCustomController(CPad* pad) {
                 pad->NewState.ShockButtonL = 255;   // Campainha da bike
             }
         } else {
-            // R2 (Aceleração & Feedback de Tração / Burnout / Derrapagem):
-            BOOL isBurnout = (gp.r2 > 90 && speedSq < 0.025f && vehHealth > 300.0f && !isBicycle);
-            BOOL isHandbrakeDrift = (gp.btnCross && speedSq > 0.04f && !isBicycle);
-
+            // R2 (Aceleração):
             if (now < s_gearSnapUntil) {
                 // Snap mecânico de troca de marcha no R2!
                 g_triggerR2Mode = 0x02; // Rigid Stop
                 g_triggerR2Param1 = 10;
                 g_triggerR2Param2 = 230;
-            } else if (isBurnout) {
-                // Cantando pneu / Pneu patinando em falso: Trepidação de alta rotação no R2
-                BOOL buzz = ((now / 40) % 2 == 0);
-                g_triggerR2Mode = 0x01; // Vibration Mode
-                g_triggerR2Param1 = 5;
-                g_triggerR2Param2 = buzz ? 190 : 80;
-                if (s_rumbleRight < 110) s_rumbleRight = 110;
-                if (now + 50 > s_rumbleUntil) s_rumbleUntil = now + 50;
-            } else if (isHandbrakeDrift) {
-                // Puxou freio de mão em curva (Drift): R2 perde resistência e treme suave
-                BOOL buzz = ((now / 60) % 2 == 0);
-                g_triggerR2Mode = 0x01;
-                g_triggerR2Param1 = 8;
-                g_triggerR2Param2 = buzz ? 140 : 40;
-                if (s_rumbleLeft < 130) s_rumbleLeft = 130;
-                if (now + 60 > s_rumbleUntil) s_rumbleUntil = now + 60;
             } else {
                 // Aceleração suave e progressiva
                 g_triggerR2Mode = 0x00;
@@ -2085,9 +1876,6 @@ static void InstallHook(void) {
     } else {
         LogMsg("[Hook] FAILED VirtualProtect at 0x%08X\n", ADDR_HOOK_SNIPER_ZOOM_IN);
     }
-
-    // 0. Inicializa flags de movimento com armas (apenas armas de fogo)
-    EnsureMoveWhileAiming();
 
     // 5. Hook JMP em CPad::SniperZoomOut (0x00540B80)
     if (VirtualProtect((LPVOID)ADDR_HOOK_SNIPER_ZOOM_OUT, 7, PAGE_EXECUTE_READWRITE, &oldProtect)) {
