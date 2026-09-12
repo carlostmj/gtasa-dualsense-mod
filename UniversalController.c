@@ -513,17 +513,20 @@ static volatile BYTE g_lastSentGreen = 0xFF;
 static volatile BYTE g_lastSentBlue = 0xFF;
 
 static void SendDualSenseHardwareReport(HANDLE hDev, BYTE leftMotor, BYTE rightMotor) {
+    DWORD now = GetTickCount();
     if (g_sonyDevType == SONY_DEV_DUALSENSE) {
         if (!g_sonyIsBluetooth) {
             // ================================================================
-            // DUALSENSE USB MODE (Report ID 0x02, 64 bytes standard)
+            // DUALSENSE USB MODE (Report ID 0x02)
+            // Windows HID requires the buffer to match caps.OutputReportByteLength (e.g. 547)
+            // or 64 bytes depending on the driver. We allocate 548 bytes safely!
             // ================================================================
-            BYTE report[64];
+            BYTE report[548];
             memset(report, 0, sizeof(report));
 
             report[0] = 0x02; // Report ID
-            report[1] = 0xFF; // valid_flag0 (motors + triggers)
-            report[2] = 0x1 | 0x2 | 0x4 | 0x10 | 0x40; // valid_flag1 (LEDs + lightbar)
+            report[1] = 0xFF; // valid_flag0 (compatible rumble + haptics + triggers)
+            report[2] = 0xF7; // valid_flag1 (0x04=lightbar enable, 0x10=player led enable, etc.)
             report[3] = rightMotor; // High-frequency weak rumble (0-255)
             report[4] = leftMotor;  // Low-frequency strong rumble (0-255)
 
@@ -538,51 +541,73 @@ static void SendDualSenseHardwareReport(HANDLE hDev, BYTE leftMotor, BYTE rightM
             report[24] = g_triggerL2Param2;
 
             // Lightbar & LEDs:
-            report[39] = 0x02; // Uninterruptable LED
-            report[42] = 0x00; // Pulse options
+            report[39] = 0x02; // valid_flag2 (0x02 = lightbar setup control enable)
+            report[42] = 0x00; // lightbar_setup (0 = normal light, 2 = lights out)
             report[43] = 0x00; // Brightness High
             report[44] = 0x04; // Player 1 LED
             report[45] = g_lightbarRed;
             report[46] = g_lightbarGreen;
             report[47] = g_lightbarBlue;
 
-            DWORD targetLen = (g_outputReportLength >= 48) ? g_outputReportLength : 64;
+            DWORD targetLen = (g_outputReportLength >= 64 && g_outputReportLength <= 548) ? g_outputReportLength : 64;
             DWORD written = 0;
-            if (!WriteFile(hDev, report, targetLen, &written, NULL)) {
-                HidD_SetOutputReport(hDev, report, targetLen);
+            BOOL ok = WriteFile(hDev, report, targetLen, &written, NULL);
+            if (!ok && targetLen != 64) {
+                ok = WriteFile(hDev, report, 64, &written, NULL);
+                if (ok) targetLen = 64;
+            }
+            if (!ok && targetLen != 63) {
+                ok = WriteFile(hDev, report, 63, &written, NULL);
+                if (ok) targetLen = 63;
+            }
+            if (!ok) {
+                ok = HidD_SetOutputReport(hDev, report, targetLen);
+            }
+            if (!ok && targetLen != 64) {
+                ok = HidD_SetOutputReport(hDev, report, 64);
+                if (ok) targetLen = 64;
+            }
+
+            static DWORD s_lastReportLog = 0;
+            if (now - s_lastReportLog > 3000) {
+                s_lastReportLog = now;
+                LogMsg("[SonyHID] Output Report USB: ok=%d, written=%u, RGB=(%u,%u,%u), R2Mode=0x%02X, L2Mode=0x%02X, targetLen=%u, LastErr=%u\n",
+                       ok, written, g_lightbarRed, g_lightbarGreen, g_lightbarBlue, g_triggerR2Mode, g_triggerL2Mode, targetLen, GetLastError());
             }
         } else {
             // ================================================================
             // DUALSENSE BLUETOOTH MODE (Report ID 0x31, 78 bytes with CRC)
+            // Linux kernel hid-playstation standard layout
             // ================================================================
             BYTE report[78];
             memset(report, 0, sizeof(report));
 
             report[0] = 0x31; // Report ID
-            report[1] = 0x02; // Tag / Sequence
-            report[2] = 0xFF; // valid_flag0 (motors + triggers)
-            report[3] = 0x1 | 0x2 | 0x4 | 0x10 | 0x40; // valid_flag1 (LEDs + lightbar)
-            report[4] = rightMotor; // High-frequency weak rumble
-            report[5] = leftMotor;  // Low-frequency strong rumble
+            report[1] = 0x02; // seq_tag
+            report[2] = 0x10; // tag (DS_OUTPUT_TAG = 0x10 mandatory for BT!)
+            report[3] = 0xFF; // valid_flag0
+            report[4] = 0xF7; // valid_flag1 (0x04 = lightbar enable)
+            report[5] = rightMotor; // High-frequency weak rumble
+            report[6] = leftMotor;  // Low-frequency strong rumble
 
             // R2 (Right Trigger):
-            report[12] = g_triggerR2Mode;
-            report[13] = g_triggerR2Param1;
-            report[14] = g_triggerR2Param2;
+            report[13] = g_triggerR2Mode;
+            report[14] = g_triggerR2Param1;
+            report[15] = g_triggerR2Param2;
 
             // L2 (Left Trigger):
-            report[23] = g_triggerL2Mode;
-            report[24] = g_triggerL2Param1;
-            report[25] = g_triggerL2Param2;
+            report[24] = g_triggerL2Mode;
+            report[25] = g_triggerL2Param1;
+            report[26] = g_triggerL2Param2;
 
             // Lightbar & LEDs:
-            report[40] = 0x02; // Uninterruptable LED
-            report[43] = 0x00;
-            report[44] = 0x00; // Brightness High
-            report[45] = 0x04; // Player 1 LED
-            report[46] = g_lightbarRed;
-            report[47] = g_lightbarGreen;
-            report[48] = g_lightbarBlue;
+            report[41] = 0x02; // valid_flag2
+            report[44] = 0x00; // lightbar_setup
+            report[45] = 0x00; // Brightness High
+            report[46] = 0x04; // Player 1 LED
+            report[47] = g_lightbarRed;
+            report[48] = g_lightbarGreen;
+            report[49] = g_lightbarBlue;
 
             // CRC32 of 0xA2 + report[0..73]
             BYTE crcBuf[75];
@@ -596,8 +621,16 @@ static void SendDualSenseHardwareReport(HANDLE hDev, BYTE leftMotor, BYTE rightM
             report[77] = (BYTE)((crc >> 24) & 0xFF);
 
             DWORD written = 0;
-            if (!WriteFile(hDev, report, 78, &written, NULL)) {
-                HidD_SetOutputReport(hDev, report, 78);
+            BOOL ok = WriteFile(hDev, report, 78, &written, NULL);
+            if (!ok) {
+                ok = HidD_SetOutputReport(hDev, report, 78);
+            }
+
+            static DWORD s_lastBtLog = 0;
+            if (now - s_lastBtLog > 3000) {
+                s_lastBtLog = now;
+                LogMsg("[SonyHID] Output Report BT: ok=%d, written=%u, RGB=(%u,%u,%u), LastErr=%u\n",
+                       ok, written, g_lightbarRed, g_lightbarGreen, g_lightbarBlue, GetLastError());
             }
         }
     } else if (g_sonyDevType == SONY_DEV_DUALSHOCK4) {
@@ -1082,6 +1115,9 @@ static void ProcessCustomController(CPad* pad) {
     // SISTEMA DE LIGHTBAR DINÂMICA (PS5 DUALSENSE & DUALSHOCK 4)
     // ========================================================================
     void* pPlayerPed = FUNC_FindPlayerPed(-1);
+    if (!pPlayerPed) {
+        pPlayerPed = *(void**)0x00B7CD98; // Fallback directly to CWorld::Players[0].m_pPed
+    }
     if (pPlayerPed) {
         DWORD wantedLevel = 0;
         BYTE* pPlayerData = *(BYTE**)((BYTE*)pPlayerPed + 0x480);
@@ -1102,6 +1138,12 @@ static void ProcessCustomController(CPad* pad) {
         } else {
             // Status de Saúde do CJ
             float health = *(float*)((BYTE*)pPlayerPed + 0x540);
+            static DWORD s_lastHealthLog = 0;
+            if (now - s_lastHealthLog > 4000) {
+                s_lastHealthLog = now;
+                LogMsg("[Lightbar] Ped=%p, Health=%.1f, Wanted=%u -> RGB=(%u,%u,%u)\n",
+                       pPlayerPed, health, wantedLevel, g_lightbarRed, g_lightbarGreen, g_lightbarBlue);
+            }
             if (health > 70.0f) {
                 // Vida Cheia / Saudável: Verde Grove Street
                 g_lightbarRed = 30; g_lightbarGreen = 220; g_lightbarBlue = 40;
