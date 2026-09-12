@@ -211,38 +211,8 @@ static const KeyTokenMap s_keyMap[] = {
 
 
 static void InitPS5Buttons(void) {
-    static BOOL s_done = FALSE;
-    if (s_done) return;
-    s_done = TRUE;
-
-    LogMsg("[PS5 Buttons] Loading models\\ps3btns.txd...\n");
-    int slot = FUNC_CTxdStore_AddTxdSlot("ps3btns");
-    if (slot >= 0) {
-        if (FUNC_CTxdStore_LoadTxd(slot, "models\\ps3btns.txd")) {
-            FUNC_CTxdStore_AddRef(slot);
-            FUNC_CTxdStore_PushCurrentTxd();
-            FUNC_CTxdStore_SetCurrentTxd(slot);
-            for (int i = 1; i <= 14; i++) {
-                if (s_psButtonNames[i]) {
-                    FUNC_CSprite2d_SetTexture(&g_ps5ButtonSprites[i], s_psButtonNames[i], NULL);
-                }
-            }
-            FUNC_CTxdStore_PopCurrentTxd();
-            LogMsg("[PS5 Buttons] Successfully loaded 14 PlayStation button textures!\n");
-
-            // Patch CFont::PrintChar displacement at 0x00718AE1
-            DWORD oldProtect;
-            if (VirtualProtect((LPVOID)0x00718AE1, 4, PAGE_EXECUTE_READWRITE, &oldProtect)) {
-                *(DWORD*)0x00718AE1 = (DWORD)g_ps5ButtonSprites;
-                VirtualProtect((LPVOID)0x00718AE1, 4, oldProtect, &oldProtect);
-                LogMsg("[PS5 Buttons] CFont::PrintChar table patched to g_ps5ButtonSprites!\n");
-            }
-        } else {
-            LogMsg("[PS5 Buttons] Failed to load models\\ps3btns.txd\n");
-        }
-    } else {
-        LogMsg("[PS5 Buttons] Failed to add TXD slot ps3btns\n");
-    }
+    // Disabled to prevent TXD loading crash during startup
+    return;
 }
 
 static void EnsureMoveWhileAiming(void) {
