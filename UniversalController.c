@@ -238,10 +238,9 @@ static BOOL __attribute__((thiscall)) Hooked_ControlGunMove(void* thisTask, cons
 }
 
 static void EnsureMoveWhileAiming(void) {
-    static DWORD s_lastCheck = 0;
-    DWORD now = GetTickCount();
-    if (now - s_lastCheck < 1000) return; // Verifica a cada 1 segundo
-    s_lastCheck = now;
+    static BOOL s_applied = FALSE;
+    if (s_applied) return; // Aplica apenas UMA vez na inicialização de forma segura!
+    s_applied = TRUE;
 
     DWORD oldProtect;
     if (VirtualProtect((LPVOID)0x00C8AAB8, 80 * 0x70, PAGE_EXECUTE_READWRITE, &oldProtect)) {
@@ -251,29 +250,28 @@ static void EnsureMoveWhileAiming(void) {
             DWORD* pFlags = (DWORD*)(pWInfo + 0x18);
             float* pMoveSpeed = (float*)(pWInfo + 0x3C);
 
-            // Ativa: bCanAim (0x01) | bMoveAim (0x10) | bMoveFire (0x20)
-            *pFlags |= 0x31;
+            // Modifica apenas armas de fogo válidas (evita corromper melee, punhos e pickups)
+            if (modelId >= 342 && modelId <= 372) {
+                *pFlags |= 0x31; // bCanAim | bMoveAim | bMoveFire
 
-            // NÃO remove b1stPerson de armas com mira telescópica ou câmera (Sniper 358, RPG 359, Heatseeker 360, Câmera 367)
-            if (modelId == 358 || modelId == 359 || modelId == 360 || modelId == 367) {
-                *pFlags |= 0x04; // Mantém o Scope telescópico da Sniper e RPG com retícula e zoom 100% funcionais!
-            } else {
-                *pFlags &= ~0x04; // Armas convencionais usam mira livre em 3ª pessoa sobre o ombro
-            }
+                // NÃO remove b1stPerson de armas com mira telescópica ou câmera
+                if (modelId == 358 || modelId == 359 || modelId == 360 || modelId == 367) {
+                    *pFlags |= 0x04;
+                } else {
+                    *pFlags &= ~0x04;
+                }
 
-            // Armas pesadas e rifles de duas mãos (M4, AK-47, Shotguns, MP5, etc.)
-            // NÃO podem ter bAimWithArm (0x02), senão a engine não chama PlayerControlZeldaWeapon!
-            // Somente armas de uma mão e a Sniper mantêm suas configurações originais.
-            if (modelId != 346 && modelId != 350 && modelId != 352 && modelId != 372 && modelId != 358) {
-                *pFlags &= ~0x02;
-            }
+                if (modelId != 346 && modelId != 350 && modelId != 352 && modelId != 372 && modelId != 358) {
+                    *pFlags &= ~0x02;
+                }
 
-            // Garante velocidade de movimento para a animação mover o personagem
-            if (*pMoveSpeed < 0.85f) {
-                *pMoveSpeed = 0.85f;
+                if (*pMoveSpeed < 0.85f) {
+                    *pMoveSpeed = 0.85f;
+                }
             }
         }
         VirtualProtect((LPVOID)0x00C8AAB8, 80 * 0x70, oldProtect, &oldProtect);
+        LogMsg("[MoveWhileAim] Safely initialized firearm flags.\n");
     }
 }
 
@@ -797,10 +795,14 @@ static DWORD WINAPI DualSenseWorkerThread(LPVOID lpParam) {
                     g_dsInput.btnTriangle = (b0 & 0x80) != 0;
 
                     BYTE dpad = b0 & 0x0F;
-                    g_dsInput.dpadUp    = (dpad == 0 || dpad == 1 || dpad == 7);
-                    g_dsInput.dpadRight = (dpad == 1 || dpad == 2 || dpad == 3);
-                    g_dsInput.dpadDown  = (dpad == 3 || dpad == 4 || dpad == 5);
-                    g_dsInput.dpadLeft  = (dpad == 5 || dpad == 6 || dpad == 7);
+                    if (dpad <= 7) {
+                        g_dsInput.dpadUp    = (dpad == 0 || dpad == 1 || dpad == 7);
+                        g_dsInput.dpadRight = (dpad == 1 || dpad == 2 || dpad == 3);
+                        g_dsInput.dpadDown  = (dpad == 3 || dpad == 4 || dpad == 5);
+                        g_dsInput.dpadLeft  = (dpad == 5 || dpad == 6 || dpad == 7);
+                    } else {
+                        g_dsInput.dpadUp = g_dsInput.dpadRight = g_dsInput.dpadDown = g_dsInput.dpadLeft = FALSE;
+                    }
 
                     BYTE b1 = buf[8];
                     g_dsInput.btnL1     = (b1 & 0x01) != 0;
@@ -837,10 +839,14 @@ static DWORD WINAPI DualSenseWorkerThread(LPVOID lpParam) {
                     g_dsInput.btnTriangle = (b0 & 0x80) != 0;
 
                     BYTE dpad = b0 & 0x0F;
-                    g_dsInput.dpadUp    = (dpad == 0 || dpad == 1 || dpad == 7);
-                    g_dsInput.dpadRight = (dpad == 1 || dpad == 2 || dpad == 3);
-                    g_dsInput.dpadDown  = (dpad == 3 || dpad == 4 || dpad == 5);
-                    g_dsInput.dpadLeft  = (dpad == 5 || dpad == 6 || dpad == 7);
+                    if (dpad <= 7) {
+                        g_dsInput.dpadUp    = (dpad == 0 || dpad == 1 || dpad == 7);
+                        g_dsInput.dpadRight = (dpad == 1 || dpad == 2 || dpad == 3);
+                        g_dsInput.dpadDown  = (dpad == 3 || dpad == 4 || dpad == 5);
+                        g_dsInput.dpadLeft  = (dpad == 5 || dpad == 6 || dpad == 7);
+                    } else {
+                        g_dsInput.dpadUp = g_dsInput.dpadRight = g_dsInput.dpadDown = g_dsInput.dpadLeft = FALSE;
+                    }
 
                     BYTE b1 = buf[base + 5];
                     g_dsInput.btnL1     = (b1 & 0x01) != 0;
@@ -864,7 +870,11 @@ static DWORD WINAPI DualSenseWorkerThread(LPVOID lpParam) {
                 }
             } else {
                 // DualSense PS5 parsing (Report 0x31 BT or 0x01 USB)
-                int base = (buf[0] == 0x31) ? 2 : 1;
+                if (buf[0] != 0x01 && buf[0] != 0x31) {
+                    continue;
+                }
+
+                int base = (buf[0] == 0x31) ? 3 : 1;
                 g_sonyIsBluetooth = (buf[0] == 0x31);
 
                 g_dsInput.lx = (short)((int)buf[base + 0] - 128);
@@ -881,10 +891,14 @@ static DWORD WINAPI DualSenseWorkerThread(LPVOID lpParam) {
                 g_dsInput.btnTriangle = (b0 & 0x80) != 0;
 
                 BYTE dpad = b0 & 0x0F;
-                g_dsInput.dpadUp    = (dpad == 0 || dpad == 1 || dpad == 7);
-                g_dsInput.dpadRight = (dpad == 1 || dpad == 2 || dpad == 3);
-                g_dsInput.dpadDown  = (dpad == 3 || dpad == 4 || dpad == 5);
-                g_dsInput.dpadLeft  = (dpad == 5 || dpad == 6 || dpad == 7);
+                if (dpad <= 7) {
+                    g_dsInput.dpadUp    = (dpad == 0 || dpad == 1 || dpad == 7);
+                    g_dsInput.dpadRight = (dpad == 1 || dpad == 2 || dpad == 3);
+                    g_dsInput.dpadDown  = (dpad == 3 || dpad == 4 || dpad == 5);
+                    g_dsInput.dpadLeft  = (dpad == 5 || dpad == 6 || dpad == 7);
+                } else {
+                    g_dsInput.dpadUp = g_dsInput.dpadRight = g_dsInput.dpadDown = g_dsInput.dpadLeft = FALSE;
+                }
 
                 BYTE b1 = buf[base + 8];
                 g_dsInput.btnL1     = (b1 & 0x01) != 0;
@@ -1250,45 +1264,43 @@ static void ProcessCustomController(CPad* pad) {
 
     // START (Options / Play) -> Alterna entre o Menu Principal de Opções e o Jogo
     if (startEdge) {
-        LogMsg("[Menu] START pressed! Active=%d, Page=%d\n", isMenuActive, curMenuPage);
         if (!isMenuActive) {
             *(BYTE*)0x00BA677B = 1; // m_bStartUpFrontEndRequested = true (Abre Menu)
             *(char*)0x00BA68A5 = 0; // m_nCurrentMenuPage = 0 (Opções)
+            *(BYTE*)0x00BA67A1 = 0;
         } else {
             *(BYTE*)0x00BA677A = 1; // m_bShutDownFrontEndRequested = true (Fecha Menu)
         }
         pad->NewState.Start = 255;
     }
 
-    // SHARE (Create / Touchpad) -> Abre diretamente o Mapa do Jogo
+    // SHARE (Create / Touchpad) -> Abre/Fecha diretamente o Mapa do Jogo
     if (shareEdge) {
-        LogMsg("[Menu] SHARE/TOUCHPAD pressed! Active=%d, Page=%d\n", isMenuActive, curMenuPage);
         if (!isMenuActive) {
             *(BYTE*)0x00BA677B = 1; // m_bStartUpFrontEndRequested = true
-            *(char*)0x00BA68A5 = 5; // m_nCurrentMenuPage = 5 (Mapa Direto)
-            *(BYTE*)0x00BA67A1 = 1; // m_bDrawRadarOrMap = true
+            *(char*)0x00BA68A5 = 41; // m_nCurrentMenuPage = 41 (Mapa no GTA SA!)
+            *(BYTE*)0x00BA67A1 = 1;  // m_bDrawRadarOrMap = true
         } else {
-            if (curMenuPage == 5) {
-                *(BYTE*)0x00BA677A = 1; // Fecha o mapa e volta ao jogo
-            } else {
-                *(char*)0x00BA68A5 = 5; // Pula de outra aba direto para o Mapa
-                *(BYTE*)0x00BA67A1 = 1;
-            }
+            *(BYTE*)0x00BA677A = 1; // Fecha o mapa/menu e volta ao jogo
         }
     }
 
-    // MAP PAGE CONTROLS (Page 5)
-    if (isMenuActive && curMenuPage == 5) {
+    // ========================================================================
+    // CONTROLES DO MAPA (Página 41 ou m_bDrawRadarOrMap ativo)
+    // ========================================================================
+    BOOL isMapScreen = (isMenuActive && (curMenuPage == 41 || *(BYTE*)0x00BA67A1 != 0));
+    if (isMapScreen) {
         float* pMapX = (float*)ADDR_MAP_BASE_X;
         float* pMapY = (float*)ADDR_MAP_BASE_Y;
-        if (pMapX && pMapY && (gp.lx != 0 || gp.ly != 0)) {
-            *pMapX += ((float)gp.lx / 128.0f) * 14.0f;
-            *pMapY += ((float)gp.ly / 128.0f) * 14.0f;
+        if (pMapX && pMapY) {
+            // Deadzone de 25 para evitar que ruído mova o mapa sozinho
+            if (abs(gp.lx) > 25) *pMapX += ((float)gp.lx / 128.0f) * 12.0f;
+            if (abs(gp.ly) > 25) *pMapY += ((float)gp.ly / 128.0f) * 12.0f;
         }
         float* pZoom = (float*)ADDR_MAP_ZOOM;
         if (pZoom) {
-            if (gp.r2 > 50 || gp.btnR1) *pZoom += 0.015f;
-            if (gp.l2 > 50 || gp.btnL1) *pZoom -= 0.015f;
+            if (gp.r2 > 50 || gp.btnR1) *pZoom += 0.012f;
+            if (gp.l2 > 50 || gp.btnL1) *pZoom -= 0.012f;
             if (*pZoom < 0.2f) *pZoom = 0.2f;
             if (*pZoom > 8.0f) *pZoom = 8.0f;
         }
@@ -1300,20 +1312,36 @@ static void ProcessCustomController(CPad* pad) {
     if (isMenuActive != 0) {
         g_triggerR2Mode = 0; g_triggerR2Param1 = 0; g_triggerR2Param2 = 0;
         g_triggerL2Mode = 0; g_triggerL2Param1 = 0; g_triggerL2Param2 = 0;
-        
+
+        // Se estiver na tela do Mapa, botões Circle ou Triangle fecham o mapa
+        if (isMapScreen) {
+            static BOOL s_lastMapBack = FALSE;
+            if ((gp.btnCircle || gp.btnTriangle) && !s_lastMapBack) {
+                *(BYTE*)0x00BA677A = 1; // Fecha o mapa e volta ao jogo
+            }
+            s_lastMapBack = (gp.btnCircle || gp.btnTriangle);
+
+            // Silencia vibração no mapa
+            s_customSniperZoomIn = false;
+            s_customSniperZoomOut = false;
+            g_targetLeftMotor = 0;
+            g_targetRightMotor = 0;
+            return; // Não envia comandos de lista para a tela do mapa!
+        }
+
         // Mantém suporte para fechar o menu com Start
         if (gp.btnStart) pad->NewState.Start = 255;
 
         // Navegação precisa de itens do Menu via CMenuManager::ProcessUserInput
-        // NOTA: Não escrevemos em pad->NewState.DPad* para evitar pulo duplo de opções nos submenus!
+        // Deadzone segura (85) para garantir que analógico em repouso nunca mova o menu!
         static DWORD s_nextNavRepeat = 0;
         static int s_activeDir = 0;
 
         int curDir = 0;
-        if (gp.dpadUp || gp.ly < -60) curDir = 1;       // CIMA
-        else if (gp.dpadDown || gp.ly > 60) curDir = 2; // BAIXO
-        else if (gp.dpadLeft || gp.lx < -60) curDir = 3;// ESQUERDA
-        else if (gp.dpadRight || gp.lx > 60) curDir = 4;// DIREITA
+        if (gp.dpadUp || gp.ly < -85) curDir = 1;       // CIMA
+        else if (gp.dpadDown || gp.ly > 85) curDir = 2; // BAIXO
+        else if (gp.dpadLeft || gp.lx < -85) curDir = 3;// ESQUERDA
+        else if (gp.dpadRight || gp.lx > 85) curDir = 4;// DIREITA
 
         char down = 0, up = 0, input = 0;
         if (curDir != 0) {
@@ -1325,7 +1353,7 @@ static void ProcessCustomController(CPad* pad) {
                 else if (curDir == 3) input = -1;// ESQUERDA -> slider / opção anterior
                 else if (curDir == 4) input = 1; // DIREITA -> slider / próxima opção
             } else if (now >= s_nextNavRepeat) {
-                s_nextNavRepeat = now + 160;     // Taxa de repetição contínua (160ms) ao segurar
+                s_nextNavRepeat = now + 180;     // Taxa de repetição contínua (180ms) ao segurar
                 if (curDir == 1) up = 1;
                 else if (curDir == 2) down = 1;
                 else if (curDir == 3) input = -1;
@@ -1363,8 +1391,7 @@ static void ProcessCustomController(CPad* pad) {
     // 1. Inicializa os icones de botoes PS5 a partir de models\ps3btns.txd
     InitPS5Buttons();
 
-    // 2. Garante que todas as 80 armas tenham bMoveAim e bMoveFire (andar e esquivar mirando/atirando)
-    EnsureMoveWhileAiming();
+    // 2. Armas configuradas na inicialização (EnsureMoveWhileAiming)
 
     // 3. Mantém suporte simultâneo a Teclado + Mouse e Controle
     *(BYTE*)0x00B6EC2E = 1;            // CCamera::m_bUseMouse3rdPerson: 1 = Câmera livre do mouse sempre ativa
@@ -1514,15 +1541,8 @@ static void ProcessCustomController(CPad* pad) {
             pad->NewState.ButtonCircle = 255;
         }
 
-        // REMOVE 100% A MIRA AUTOMÁTICA (Sem cones/triângulos verdes girando e sem lock-on)
-        // Garante que CJ nunca trave mira em pedestres e a câmera nunca fique presa
-        void* pPlayer = FUNC_FindPlayerPed(-1);
-        if (pPlayer) {
-            void* pTarget = *(void**)((BYTE*)pPlayer + 0x79C);
-            if (pTarget) {
-                ((void (__attribute__((thiscall)) *)(void*))0x0060D5A0)(pPlayer); // ClearWeaponTarget
-            }
-        }
+        // 100% Mira Livre (Free Aim): CPlayerPed::FindWeaponLockOnTarget foi patcheado
+        // nativamente com 'xor eax, eax; ret' no motor do jogo, eliminando auto-aim e cones 3D.
 
         // --------------------------------------------------------------------
         // GATILHOS ADAPTÁVEIS A PÉ:
@@ -1652,65 +1672,18 @@ static void ProcessCustomController(CPad* pad) {
         if (gp.dpadRight) pad->NewState.DPadRight = 255;
 
         // ====================================================================
-        // RODA DE ARMAS COM SLOW MOTION (SEGURAR L1 ESTILO GTA V / RDR2)
+        // TROCA DE ARMA RÁPIDA E NATIVA (L1 e R1) - 1 TOQUE = 1 ARMA
         // ====================================================================
-        static DWORD s_l1PressStart = 0;
-        static BOOL s_weaponWheelActive = FALSE;
-        static int s_selectedWheelSlot = -1;
-
-        if (gp.btnL1) {
-            if (s_l1PressStart == 0) {
-                s_l1PressStart = now;
-            } else if (now - s_l1PressStart > 220) {
-                // Segurou L1: Ativa Bullet Time cinematográfico (20% de velocidade do jogo!)
-                s_weaponWheelActive = TRUE;
-                *(float*)0x00B7CB64 = 0.20f; // CTimer::ms_fTimeScale
-
-                // Seleciona arma pelo ângulo do analógico direito
-                float rx = (float)gp.rx;
-                float ry = (float)gp.ry;
-                float mag = sqrtf(rx * rx + ry * ry);
-                if (mag > 40.0f) {
-                    float angle = atan2f(-ry, rx);
-                    if (angle < 0) angle += 6.2831853f;
-
-                    // 8 Slots de armas principais do CJ (Slots 1 a 8)
-                    int newSlot = 1 + (int)((angle / 6.2831853f) * 8.0f) % 8;
-                    if (newSlot != s_selectedWheelSlot) {
-                        s_selectedWheelSlot = newSlot;
-                        // Clique háptico no motor direito a cada arma apontada
-                        if (s_rumbleRight < 120) s_rumbleRight = 120;
-                        if (now + 40 > s_rumbleUntil) s_rumbleUntil = now + 40;
-                    }
-                }
-            }
-        } else {
-            if (s_l1PressStart != 0) {
-                if (s_weaponWheelActive) {
-                    // Soltou L1: Restaura velocidade normal do tempo
-                    s_weaponWheelActive = FALSE;
-                    *(float*)0x00B7CB64 = 1.0f; // CTimer::ms_fTimeScale
-
-                    // Equipa a arma do slot escolhido
-                    if (pPlayerPed && s_selectedWheelSlot >= 1 && s_selectedWheelSlot <= 8) {
-                        BYTE* pPed = (BYTE*)pPlayerPed;
-                        DWORD weaponType = *(DWORD*)(pPed + 0x5A0 + s_selectedWheelSlot * 0x1C);
-                        if (weaponType > 0) {
-                            ((void(__thiscall*)(void*, int))0x005E61F0)(pPed, weaponType);
-                        }
-                    }
-                } else if (now - s_l1PressStart <= 220) {
-                    // Toque rápido (tap < 220ms): Ciclo clássico de arma anterior
-                    pad->NewState.LeftShoulder2 = 255;
-                }
-                s_l1PressStart = 0;
-                s_selectedWheelSlot = -1;
-            }
+        static BOOL s_lastL1 = FALSE;
+        static BOOL s_lastR1 = FALSE;
+        if (gp.btnL1 && !s_lastL1) {
+            pad->NewState.LeftShoulder2 = 255;  // Ciclo arma anterior
         }
-
-        if (gp.btnR1) {
+        if (gp.btnR1 && !s_lastR1) {
             pad->NewState.RightShoulder2 = 255; // Ciclo arma seguinte
         }
+        s_lastL1 = gp.btnL1;
+        s_lastR1 = gp.btnR1;
 
         // ANALÓGICOS PRESSIONADOS
         if (gp.btnL3) pad->NewState.ShockButtonL = 255; // Agachar (Duck)
@@ -2080,6 +2053,9 @@ static void InstallHook(void) {
     } else {
         LogMsg("[Hook] FAILED VirtualProtect at 0x%08X\n", ADDR_HOOK_SNIPER_ZOOM_IN);
     }
+
+    // 0. Inicializa flags de movimento com armas (apenas armas de fogo)
+    EnsureMoveWhileAiming();
 
     // 5. Hook JMP em CPad::SniperZoomOut (0x00540B80)
     if (VirtualProtect((LPVOID)ADDR_HOOK_SNIPER_ZOOM_OUT, 7, PAGE_EXECUTE_READWRITE, &oldProtect)) {
