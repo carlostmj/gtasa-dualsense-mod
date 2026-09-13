@@ -113,7 +113,7 @@ typedef void (__attribute__((thiscall)) *tSwitchMenuOnAndOff)(void* thisMgr);
 typedef char (__attribute__((thiscall)) *tSwitchToNewScreen)(void* thisMgr, char page);
 #define FUNC_SwitchToNewScreen ((tSwitchToNewScreen)0x00573680)
 
-typedef void (__attribute__((thiscall)) *tProcessUserInput)(void* thisMgr, char down, char up, char enter, char exit, char input);
+typedef void (__attribute__((thiscall)) *tProcessUserInput)(void* thisMgr, char up, char down, char enter, char exit, char input);
 #define FUNC_ProcessUserInput ((tProcessUserInput)0x0057B480)
 
 static void LogMsg(const char* fmt, ...);
@@ -846,30 +846,63 @@ static DWORD WINAPI DualSenseWorkerThread(LPVOID lpParam) {
                     g_dsInput.connected = TRUE;
                 }
             } else {
-                // DualSense PS5 parsing (Report 0x31 BT or 0x01 USB)
-                int base = (buf[0] == 0x31) ? 2 : 1;
-                g_sonyIsBluetooth = (buf[0] == 0x31);
+                // DualSense PS5 parsing (Supports Windows Bluetooth Report 0x01, Native USB 0x01, and Raw BT 0x31)
+                BYTE b0 = 0, b1 = 0, b2 = 0;
+                if (buf[0] == 0x01) {
+                    if ((buf[5] & 0x0F) <= 8 && (buf[8] & 0x0F) != 8) {
+                        // Windows Bluetooth HID format (DS4-compatible wrapper):
+                        g_sonyIsBluetooth = TRUE;
+                        g_dsInput.lx = (short)((int)buf[1] - 128);
+                        g_dsInput.ly = (short)((int)buf[2] - 128);
+                        g_dsInput.rx = (short)((int)buf[3] - 128);
+                        g_dsInput.ry = (short)((int)buf[4] - 128);
+                        b0 = buf[5];
+                        b1 = buf[6];
+                        b2 = buf[7];
+                        g_dsInput.l2 = buf[8];
+                        g_dsInput.r2 = buf[9];
+                    } else {
+                        // Native USB format:
+                        g_sonyIsBluetooth = FALSE;
+                        g_dsInput.lx = (short)((int)buf[1] - 128);
+                        g_dsInput.ly = (short)((int)buf[2] - 128);
+                        g_dsInput.rx = (short)((int)buf[3] - 128);
+                        g_dsInput.ry = (short)((int)buf[4] - 128);
+                        g_dsInput.l2 = buf[5];
+                        g_dsInput.r2 = buf[6];
+                        b0 = buf[8];
+                        b1 = buf[9];
+                        b2 = (readBytes > 10) ? buf[10] : 0;
+                    }
+                } else if (buf[0] == 0x31) {
+                    // Raw Bluetooth 0x31:
+                    g_sonyIsBluetooth = TRUE;
+                    g_dsInput.lx = (short)((int)buf[3] - 128);
+                    g_dsInput.ly = (short)((int)buf[4] - 128);
+                    g_dsInput.rx = (short)((int)buf[5] - 128);
+                    g_dsInput.ry = (short)((int)buf[6] - 128);
+                    g_dsInput.l2 = buf[7];
+                    g_dsInput.r2 = buf[8];
+                    b0 = buf[9];
+                    b1 = buf[10];
+                    b2 = (readBytes > 11) ? buf[11] : 0;
+                }
 
-                g_dsInput.lx = (short)((int)buf[base + 0] - 128);
-                g_dsInput.ly = (short)((int)buf[base + 1] - 128);
-                g_dsInput.rx = (short)((int)buf[base + 2] - 128);
-                g_dsInput.ry = (short)((int)buf[base + 3] - 128);
-                g_dsInput.l2 = buf[base + 4];
-                g_dsInput.r2 = buf[base + 5];
-
-                BYTE b0 = buf[base + 7];
                 g_dsInput.btnSquare   = (b0 & 0x10) != 0;
                 g_dsInput.btnCross    = (b0 & 0x20) != 0;
                 g_dsInput.btnCircle   = (b0 & 0x40) != 0;
                 g_dsInput.btnTriangle = (b0 & 0x80) != 0;
 
                 BYTE dpad = b0 & 0x0F;
-                g_dsInput.dpadUp    = (dpad == 0 || dpad == 1 || dpad == 7);
-                g_dsInput.dpadRight = (dpad == 1 || dpad == 2 || dpad == 3);
-                g_dsInput.dpadDown  = (dpad == 3 || dpad == 4 || dpad == 5);
-                g_dsInput.dpadLeft  = (dpad == 5 || dpad == 6 || dpad == 7);
+                if (dpad <= 7 && b0 != 0) {
+                    g_dsInput.dpadUp    = (dpad == 0 || dpad == 1 || dpad == 7);
+                    g_dsInput.dpadRight = (dpad == 1 || dpad == 2 || dpad == 3);
+                    g_dsInput.dpadDown  = (dpad == 3 || dpad == 4 || dpad == 5);
+                    g_dsInput.dpadLeft  = (dpad == 5 || dpad == 6 || dpad == 7);
+                } else {
+                    g_dsInput.dpadUp = g_dsInput.dpadRight = g_dsInput.dpadDown = g_dsInput.dpadLeft = FALSE;
+                }
 
-                BYTE b1 = buf[base + 8];
                 g_dsInput.btnL1     = (b1 & 0x01) != 0;
                 g_dsInput.btnR1     = (b1 & 0x02) != 0;
                 g_dsInput.btnL2     = (b1 & 0x04) != 0;
@@ -879,7 +912,6 @@ static DWORD WINAPI DualSenseWorkerThread(LPVOID lpParam) {
                 g_dsInput.btnL3     = (b1 & 0x40) != 0;
                 g_dsInput.btnR3     = (b1 & 0x80) != 0;
 
-                BYTE b2 = (readBytes > (DWORD)(base + 9)) ? buf[base + 9] : 0;
                 g_dsInput.btnPS     = (b2 & 0x01) != 0;
                 g_dsInput.btnTouch  = (b2 & 0x02) != 0;
                 g_dsInput.btnSelect = g_dsInput.btnShare || g_dsInput.btnTouch;
@@ -1018,23 +1050,29 @@ static BOOL PollDirectInput(DualSenseInputState* outState) {
             outState->ry = ry;
             outState->l2 = (BYTE)(jie.dwUpos / 257);
             outState->r2 = (BYTE)(jie.dwVpos / 257);
-            outState->btnCross    = (jie.dwButtons & (1 << 0)) != 0;
-            outState->btnCircle   = (jie.dwButtons & (1 << 1)) != 0;
-            outState->btnSquare   = (jie.dwButtons & (1 << 2)) != 0;
-            outState->btnTriangle = (jie.dwButtons & (1 << 3)) != 0;
-            outState->btnL1       = (jie.dwButtons & (1 << 4)) != 0;
-            outState->btnR1       = (jie.dwButtons & (1 << 5)) != 0;
-            outState->btnShare    = (jie.dwButtons & (1 << 8)) != 0;
-            outState->btnStart    = (jie.dwButtons & (1 << 9)) != 0;
-            outState->btnL3       = (jie.dwButtons & (1 << 10)) != 0;
-            outState->btnR3       = (jie.dwButtons & (1 << 11)) != 0;
+            outState->btnSquare   = (jie.dwButtons & (1 << 0)) != 0; // Botão 1: Quadrado
+            outState->btnCross    = (jie.dwButtons & (1 << 1)) != 0; // Botão 2: Cruz (X)
+            outState->btnCircle   = (jie.dwButtons & (1 << 2)) != 0; // Botão 3: Círculo (Bola)
+            outState->btnTriangle = (jie.dwButtons & (1 << 3)) != 0; // Botão 4: Triângulo
+            outState->btnL1       = (jie.dwButtons & (1 << 4)) != 0; // Botão 5: L1
+            outState->btnR1       = (jie.dwButtons & (1 << 5)) != 0; // Botão 6: R1
+            outState->btnL2       = (jie.dwButtons & (1 << 6)) != 0; // Botão 7: L2
+            outState->btnR2       = (jie.dwButtons & (1 << 7)) != 0; // Botão 8: R2
+            outState->btnShare    = (jie.dwButtons & (1 << 8)) != 0; // Botão 9: Share
+            outState->btnStart    = (jie.dwButtons & (1 << 9)) != 0; // Botão 10: Options/Start
+            outState->btnL3       = (jie.dwButtons & (1 << 10)) != 0; // Botão 11: L3
+            outState->btnR3       = (jie.dwButtons & (1 << 11)) != 0; // Botão 12: R3
             outState->btnSelect   = outState->btnShare;
             if (jie.dwPOV != 0xFFFF) {
                 outState->dpadUp    = (jie.dwPOV == 0    || jie.dwPOV == 4500  || jie.dwPOV == 31500);
                 outState->dpadRight = (jie.dwPOV == 4500 || jie.dwPOV == 9000  || jie.dwPOV == 13500);
                 outState->dpadDown  = (jie.dwPOV == 13500|| jie.dwPOV == 18000 || jie.dwPOV == 22500);
                 outState->dpadLeft  = (jie.dwPOV == 22500|| jie.dwPOV == 27000 || jie.dwPOV == 31500);
+            } else {
+                outState->dpadUp = outState->dpadRight = outState->dpadDown = outState->dpadLeft = FALSE;
             }
+            if (outState->btnL2 && outState->l2 < 200) outState->l2 = 255;
+            if (outState->btnR2 && outState->r2 < 200) outState->r2 = 255;
             return TRUE;
         }
     }
@@ -1272,21 +1310,22 @@ static void ProcessCustomController(CPad* pad) {
         static DWORD s_nextNavRepeat = 0;
         static int s_activeDir = 0;
 
+        // No Menu: navegação EXCLUSIVA por D-Pad (o analógico NUNCA move menus no GTA SA original)
         int curDir = 0;
-        if (gp.dpadUp || gp.ly < -60) curDir = 1;       // CIMA
-        else if (gp.dpadDown || gp.ly > 60) curDir = 2; // BAIXO
-        else if (gp.dpadLeft || gp.lx < -60) curDir = 3;// ESQUERDA
-        else if (gp.dpadRight || gp.lx > 60) curDir = 4;// DIREITA
+        if (gp.dpadUp) curDir = 1;       // CIMA
+        else if (gp.dpadDown) curDir = 2; // BAIXO
+        else if (gp.dpadLeft) curDir = 3; // ESQUERDA
+        else if (gp.dpadRight) curDir = 4;// DIREITA
 
-        char down = 0, up = 0, input = 0;
+        char up = 0, down = 0, input = 0;
         if (curDir != 0) {
             if (curDir != s_activeDir) {
                 s_activeDir = curDir;
                 s_nextNavRepeat = now + 350;     // Delay inicial de 350ms para evitar pulo acidental
-                if (curDir == 1) up = 1;         // CIMA -> decrementa índice (sobe 1 item)
-                else if (curDir == 2) down = 1;  // BAIXO -> incrementa índice (desce 1 item)
-                else if (curDir == 3) input = -1;// ESQUERDA -> slider / opção anterior
-                else if (curDir == 4) input = 1; // DIREITA -> slider / próxima opção
+                if (curDir == 1) up = 1;         // CIMA -> sobe 1 item
+                else if (curDir == 2) down = 1;  // BAIXO -> desce 1 item
+                else if (curDir == 3) input = -1;// ESQUERDA -> slider anterior
+                else if (curDir == 4) input = 1; // DIREITA -> próximo slider
             } else if (now >= s_nextNavRepeat) {
                 s_nextNavRepeat = now + 160;     // Taxa de repetição contínua (160ms) ao segurar
                 if (curDir == 1) up = 1;
@@ -1305,8 +1344,9 @@ static void ProcessCustomController(CPad* pad) {
         s_lastCross = gp.btnCross;
         s_lastBack = (gp.btnCircle || gp.btnTriangle);
 
-        if (down || up || enter || exit || input) {
-            FUNC_ProcessUserInput((void*)ADDR_FRONTEND_MENU_MANAGER, down, up, enter, exit, input);
+        // Ordem oficial da engine do GTA SA: (manager, up, down, enter, exit, input)
+        if (up || down || enter || exit || input) {
+            FUNC_ProcessUserInput((void*)ADDR_FRONTEND_MENU_MANAGER, up, down, enter, exit, input);
         }
 
         // Silence rumble while in menu
