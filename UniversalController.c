@@ -875,14 +875,14 @@ static DWORD WINAPI DualSenseWorkerThread(LPVOID lpParam) {
                         b2 = (readBytes > 10) ? buf[10] : 0;
                     }
                 } else if (buf[0] == 0x31) {
-                    // Raw Bluetooth 0x31:
+                    // Raw Bluetooth 0x31 (DualSense native Bluetooth report):
                     g_sonyIsBluetooth = TRUE;
-                    g_dsInput.lx = (short)((int)buf[3] - 128);
-                    g_dsInput.ly = (short)((int)buf[4] - 128);
-                    g_dsInput.rx = (short)((int)buf[5] - 128);
-                    g_dsInput.ry = (short)((int)buf[6] - 128);
-                    g_dsInput.l2 = buf[7];
-                    g_dsInput.r2 = buf[8];
+                    g_dsInput.lx = (short)((int)buf[2] - 128);
+                    g_dsInput.ly = (short)((int)buf[3] - 128);
+                    g_dsInput.rx = (short)((int)buf[4] - 128);
+                    g_dsInput.ry = (short)((int)buf[5] - 128);
+                    g_dsInput.l2 = buf[6];
+                    g_dsInput.r2 = buf[7];
                     b0 = buf[9];
                     b1 = buf[10];
                     b2 = (readBytes > 11) ? buf[11] : 0;
