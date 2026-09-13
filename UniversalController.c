@@ -555,40 +555,17 @@ static void SendDualSenseHardwareReport(HANDLE hDev, BYTE leftMotor, BYTE rightM
             report[46] = g_lightbarGreen;
             report[47] = g_lightbarBlue;
 
-            DWORD targetLen = (g_outputReportLength >= 64 && g_outputReportLength <= 548) ? g_outputReportLength : 64;
             DWORD written = 0;
-            BOOL ok = WriteFile(hDev, report, targetLen, &written, NULL);
-            if (!ok && targetLen != 64) {
-                ok = WriteFile(hDev, report, 64, &written, NULL);
-                if (ok) targetLen = 64;
-            }
-            if (!ok && targetLen != 63) {
-                ok = WriteFile(hDev, report, 63, &written, NULL);
-                if (ok) targetLen = 63;
-            }
-            if (!ok) {
-                ok = HidD_SetOutputReport(hDev, report, targetLen);
-            }
-            if (!ok && targetLen != 64) {
-                ok = HidD_SetOutputReport(hDev, report, 64);
-                if (ok) targetLen = 64;
-            }
-
-            static DWORD s_lastReportLog = 0;
-            if (now - s_lastReportLog > 3000) {
-                s_lastReportLog = now;
-                LogMsg("[SonyHID] Output Report USB: ok=%d, written=%u, RGB=(%u,%u,%u), R2Mode=0x%02X, L2Mode=0x%02X, targetLen=%u\n",
-                       ok, written, g_lightbarRed, g_lightbarGreen, g_lightbarBlue, g_triggerR2Mode, g_triggerL2Mode, targetLen);
-            }
+            WriteFile(hDev, report, 64, &written, NULL);
         } else {
             // ================================================================
             // DUALSENSE BLUETOOTH MODE (Report ID 0x31)
-            // Linux kernel hid-playstation & SDL official specification
+            // Linux kernel hid-playstation & SDL official specification (78 bytes)
             // ================================================================
             static BYTE s_btSeq = 0;
             s_btSeq = (s_btSeq + 1) & 0x0F;
 
-            BYTE report[548];
+            BYTE report[78];
             memset(report, 0, sizeof(report));
 
             report[0] = 0x31; // Report ID
@@ -602,7 +579,7 @@ static void SendDualSenseHardwareReport(HANDLE hDev, BYTE leftMotor, BYTE rightM
                 report[4] = 0x08; // Reset LED state (k_EDS5EffectLEDReset)
             } else {
                 report[3] = 0x03; // valid_flag0 (compatible rumble + haptics select)
-                report[4] = 0x14; // valid_flag1 (0x04=lightbar enable, 0x10=player led enable - NO 0x08!)
+                report[4] = 0x14; // valid_flag1 (0x04=lightbar enable, 0x10=player led enable)
                 report[5] = rightMotor; // High-frequency weak rumble
                 report[6] = leftMotor;  // Low-frequency strong rumble
 
@@ -643,29 +620,10 @@ static void SendDualSenseHardwareReport(HANDLE hDev, BYTE leftMotor, BYTE rightM
             report[76] = (BYTE)((crc >> 16) & 0xFF);
             report[77] = (BYTE)((crc >> 24) & 0xFF);
 
-            DWORD targetLen = (g_outputReportLength >= 78 && g_outputReportLength <= 548) ? g_outputReportLength : 547;
             DWORD written = 0;
-            BOOL ok = WriteFile(hDev, report, targetLen, &written, NULL);
-            if (!ok && targetLen != 78) {
-                ok = WriteFile(hDev, report, 78, &written, NULL);
-                if (ok) targetLen = 78;
-            }
-            if (!ok) {
-                ok = HidD_SetOutputReport(hDev, report, targetLen);
-            }
-            if (!ok && targetLen != 78) {
-                ok = HidD_SetOutputReport(hDev, report, 78);
-                if (ok) targetLen = 78;
-            }
-
-            static DWORD s_lastBtLog = 0;
-            if (now - s_lastBtLog > 3000) {
-                s_lastBtLog = now;
-                LogMsg("[SonyHID] Output Report BT: ok=%d, written=%u, RGB=(%u,%u,%u), R2Mode=0x%02X, L2Mode=0x%02X, targetLen=%u\n",
-                       ok, written, g_lightbarRed, g_lightbarGreen, g_lightbarBlue, g_triggerR2Mode, g_triggerL2Mode, targetLen);
-            }
+            WriteFile(hDev, report, 78, &written, NULL);
         }
-} else if (g_sonyDevType == SONY_DEV_DUALSHOCK4) {
+    } else if (g_sonyDevType == SONY_DEV_DUALSHOCK4) {
         if (g_sonyIsBluetooth) {
             BYTE report[78];
             memset(report, 0, sizeof(report));
@@ -689,9 +647,7 @@ static void SendDualSenseHardwareReport(HANDLE hDev, BYTE leftMotor, BYTE rightM
             report[77] = (BYTE)((crc >> 24) & 0xFF);
 
             DWORD written = 0;
-            if (!WriteFile(hDev, report, 78, &written, NULL)) {
-                HidD_SetOutputReport(hDev, report, 78);
-            }
+            WriteFile(hDev, report, 78, &written, NULL);
         } else {
             BYTE report[32];
             memset(report, 0, sizeof(report));
@@ -703,17 +659,48 @@ static void SendDualSenseHardwareReport(HANDLE hDev, BYTE leftMotor, BYTE rightM
             report[7] = g_lightbarGreen;
             report[8] = g_lightbarBlue;
 
-            DWORD targetLen = (g_outputReportLength >= 32) ? g_outputReportLength : 32;
             DWORD written = 0;
-            if (!WriteFile(hDev, report, targetLen, &written, NULL)) {
-                HidD_SetOutputReport(hDev, report, targetLen);
-            }
+            WriteFile(hDev, report, 32, &written, NULL);
         }
     }
 }
 
-static DWORD WINAPI DualSenseWorkerThread(LPVOID lpParam) {
-    LogMsg("[SonyHID] Worker Thread started (DualSense & DualShock 4 Support).\n");
+static DWORD WINAPI DualSenseOutputThread(LPVOID lpParam) {
+    SetThreadPriority(GetCurrentThread(), THREAD_PRIORITY_BELOW_NORMAL);
+    while (g_dsRunning) {
+        if (g_hDualSense != INVALID_HANDLE_VALUE && g_dsInput.connected) {
+            DWORD now = GetTickCount();
+            BOOL motorChanged = (g_targetLeftMotor != g_lastSentLeftMotor || g_targetRightMotor != g_lastSentRightMotor);
+            BOOL triggerChanged = (g_triggerR2Mode != g_lastSentR2Mode || g_triggerR2Param1 != g_lastSentR2P1 ||
+                                   g_triggerR2Param2 != g_lastSentR2P2 || g_triggerL2Mode != g_lastSentL2Mode ||
+                                   g_triggerL2Param1 != g_lastSentL2P1 || g_triggerL2Param2 != g_lastSentL2P2);
+            BOOL lightbarChanged = (g_lightbarRed != g_lastSentRed || g_lightbarGreen != g_lastSentGreen || g_lightbarBlue != g_lastSentBlue);
+            BOOL heartbeat = (now - g_lastOutputTick) >= 500;
+
+            if (motorChanged || triggerChanged || lightbarChanged || heartbeat) {
+                g_lastSentLeftMotor = g_targetLeftMotor;
+                g_lastSentRightMotor = g_targetRightMotor;
+                g_lastSentR2Mode = g_triggerR2Mode;
+                g_lastSentR2P1 = g_triggerR2Param1;
+                g_lastSentR2P2 = g_triggerR2Param2;
+                g_lastSentL2Mode = g_triggerL2Mode;
+                g_lastSentL2P1 = g_triggerL2Param1;
+                g_lastSentL2P2 = g_triggerL2Param2;
+                g_lastSentRed = g_lightbarRed;
+                g_lastSentGreen = g_lightbarGreen;
+                g_lastSentBlue = g_lightbarBlue;
+                g_lastOutputTick = now;
+                SendDualSenseHardwareReport(g_hDualSense, g_lastSentLeftMotor, g_lastSentRightMotor);
+            }
+        }
+        Sleep(25);
+    }
+    return 0;
+}
+
+static DWORD WINAPI DualSenseInputThread(LPVOID lpParam) {
+    SetThreadPriority(GetCurrentThread(), THREAD_PRIORITY_HIGHEST);
+    LogMsg("[SonyHID] Input Thread started (High-Priority Direct Stream).\n");
 
     BYTE buf[78];
     DWORD readBytes = 0;
@@ -737,32 +724,7 @@ static DWORD WINAPI DualSenseWorkerThread(LPVOID lpParam) {
             }
         }
 
-        // 1. Output update (Rumble, Triggers & Lightbar heartbeat)
-        DWORD now = GetTickCount();
-        BOOL motorChanged = (g_targetLeftMotor != g_lastSentLeftMotor || g_targetRightMotor != g_lastSentRightMotor);
-        BOOL triggerChanged = (g_triggerR2Mode != g_lastSentR2Mode || g_triggerR2Param1 != g_lastSentR2P1 ||
-                               g_triggerR2Param2 != g_lastSentR2P2 || g_triggerL2Mode != g_lastSentL2Mode ||
-                               g_triggerL2Param1 != g_lastSentL2P1 || g_triggerL2Param2 != g_lastSentL2P2);
-        BOOL lightbarChanged = (g_lightbarRed != g_lastSentRed || g_lightbarGreen != g_lastSentGreen || g_lightbarBlue != g_lastSentBlue);
-        BOOL heartbeat = (now - g_lastOutputTick) >= 150;
-
-        if (motorChanged || triggerChanged || lightbarChanged || heartbeat) {
-            g_lastSentLeftMotor = g_targetLeftMotor;
-            g_lastSentRightMotor = g_targetRightMotor;
-            g_lastSentR2Mode = g_triggerR2Mode;
-            g_lastSentR2P1 = g_triggerR2Param1;
-            g_lastSentR2P2 = g_triggerR2Param2;
-            g_lastSentL2Mode = g_triggerL2Mode;
-            g_lastSentL2P1 = g_triggerL2Param1;
-            g_lastSentL2P2 = g_triggerL2Param2;
-            g_lastSentRed = g_lightbarRed;
-            g_lastSentGreen = g_lightbarGreen;
-            g_lastSentBlue = g_lightbarBlue;
-            g_lastOutputTick = now;
-            SendDualSenseHardwareReport(g_hDualSense, g_lastSentLeftMotor, g_lastSentRightMotor);
-        }
-
-        // 2. Read hardware input stream
+        // Read hardware input stream directly with zero wait
         if (ReadFile(g_hDualSense, buf, 78, &readBytes, NULL) && readBytes >= 10) {
             if (g_sonyDevType == SONY_DEV_DUALSHOCK4) {
                 if (buf[0] == 0x11 && readBytes >= 12) {
@@ -1164,20 +1126,6 @@ static void ProcessCustomController(CPad* pad) {
     // Tell engine that pad is active and touched
     pad->LastTimeTouched = now;
 
-    // Log active gameplay input periodically
-    BOOL hasInput = (gp.lx != 0 || gp.ly != 0 || gp.rx != 0 || gp.ry != 0 ||
-                     gp.l2 > 30 || gp.r2 > 30 || gp.btnCross || gp.btnSquare ||
-                     gp.btnTriangle || gp.btnCircle || gp.btnL1 || gp.btnR1 ||
-                     gp.dpadUp || gp.dpadDown || gp.dpadLeft || gp.dpadRight ||
-                     gp.btnStart || gp.btnSelect || gp.btnPS);
-
-    if (hasInput && (now - g_lastInputLogTime > 2500)) {
-        g_lastInputLogTime = now;
-        LogMsg("[Pad0 Input] Active: LX=%d, LY=%d, RX=%d, RY=%d, L2=%d, R2=%d, X=%d, Sq=%d, Tri=%d, Cir=%d\n",
-               gp.lx, gp.ly, gp.rx, gp.ry, gp.l2, gp.r2,
-               gp.btnCross, gp.btnSquare, gp.btnTriangle, gp.btnCircle);
-    }
-
     BYTE isMenuActive = *(BYTE*)ADDR_MENU_ACTIVE;
     char curMenuPage = *(char*)ADDR_CURRENT_MENU_PAGE;
 
@@ -1199,8 +1147,8 @@ static void ProcessCustomController(CPad* pad) {
         }
 
         if (wantedLevel > 0) {
-            // Perseguição Policial: Giroflex piscando alternado Vermelho / Azul!
-            if ((now / 180) % 2 == 0) {
+            // Perseguição Policial: Giroflex piscando alternado Vermelho / Azul suave
+            if ((now / 350) % 2 == 0) {
                 g_lightbarRed = 255; g_lightbarGreen = 0; g_lightbarBlue = 0;
             } else {
                 g_lightbarRed = 0; g_lightbarGreen = 40; g_lightbarBlue = 255;
@@ -1208,12 +1156,6 @@ static void ProcessCustomController(CPad* pad) {
         } else {
             // Status de Saúde do CJ
             float health = *(float*)((BYTE*)pPlayerPed + 0x540);
-            static DWORD s_lastHealthLog = 0;
-            if (now - s_lastHealthLog > 4000) {
-                s_lastHealthLog = now;
-                LogMsg("[Lightbar] Ped=%p, Health=%.1f, Wanted=%u -> RGB=(%u,%u,%u)\n",
-                       pPlayerPed, health, wantedLevel, g_lightbarRed, g_lightbarGreen, g_lightbarBlue);
-            }
             if (health > 70.0f) {
                 // Vida Cheia / Saudável: Verde Grove Street
                 g_lightbarRed = 30; g_lightbarGreen = 220; g_lightbarBlue = 40;
@@ -1953,9 +1895,10 @@ BOOL WINAPI DllMain(HINSTANCE hinstDLL, DWORD fdwReason, LPVOID lpvReserved) {
         LogMsg(" Built exclusively for GTA San Andreas\n");
         LogMsg("====================================================\n");
         LoadConfig();
-        // Start DualSense HID thread immediately on DLL load (not lazy)
-        LogMsg("[Init] Starting DualSense HID worker thread...\n");
-        CreateThread(NULL, 0, DualSenseWorkerThread, NULL, 0, NULL);
+        // Start DualSense Input and Output threads
+        LogMsg("[Init] Starting High-Priority DualSense Input & Output threads...\n");
+        CreateThread(NULL, 0, DualSenseInputThread, NULL, 0, NULL);
+        CreateThread(NULL, 0, DualSenseOutputThread, NULL, 0, NULL);
         // Install game hooks
         InstallHook();
     } else if (fdwReason == DLL_PROCESS_DETACH) {
