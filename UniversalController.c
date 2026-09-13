@@ -113,7 +113,7 @@ typedef void (__attribute__((thiscall)) *tSwitchMenuOnAndOff)(void* thisMgr);
 typedef char (__attribute__((thiscall)) *tSwitchToNewScreen)(void* thisMgr, char page);
 #define FUNC_SwitchToNewScreen ((tSwitchToNewScreen)0x00573680)
 
-typedef void (__attribute__((thiscall)) *tProcessUserInput)(void* thisMgr, char up, char down, char enter, char exit, char input);
+typedef void (__attribute__((thiscall)) *tProcessUserInput)(void* thisMgr, char down, char up, char enter, char exit, char input);
 #define FUNC_ProcessUserInput ((tProcessUserInput)0x0057B480)
 
 static void LogMsg(const char* fmt, ...);
@@ -1344,9 +1344,10 @@ static void ProcessCustomController(CPad* pad) {
         s_lastCross = gp.btnCross;
         s_lastBack = (gp.btnCircle || gp.btnTriangle);
 
-        // Ordem oficial da engine do GTA SA: (manager, up, down, enter, exit, input)
-        if (up || down || enter || exit || input) {
-            FUNC_ProcessUserInput((void*)ADDR_FRONTEND_MENU_MANAGER, up, down, enter, exit, input);
+        // Ordem oficial da engine do GTA SA: (manager, down, up, enter, exit, input)
+        // down (arg 1) incrementa o item do menu (desce); up (arg 2) decrementa o item (sobe)
+        if (down || up || enter || exit || input) {
+            FUNC_ProcessUserInput((void*)ADDR_FRONTEND_MENU_MANAGER, down, up, enter, exit, input);
         }
 
         // Silence rumble while in menu
@@ -1737,6 +1738,12 @@ static void ProcessCustomController(CPad* pad) {
             if (gp.btnR3) {
                 pad->NewState.ShockButtonR = 255;   // Missão veículo
             }
+
+            // D-Pad no Veículo (Mudar estação de rádio / hidráulica)
+            if (gp.dpadUp)    pad->NewState.DPadUp    = 255;
+            if (gp.dpadDown)  pad->NewState.DPadDown  = 255;
+            if (gp.dpadLeft)  pad->NewState.DPadLeft  = 255;
+            if (gp.dpadRight) pad->NewState.DPadRight = 255;
         }
     }
 
