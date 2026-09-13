@@ -894,7 +894,7 @@ static DWORD WINAPI DualSenseWorkerThread(LPVOID lpParam) {
                 g_dsInput.btnTriangle = (b0 & 0x80) != 0;
 
                 BYTE dpad = b0 & 0x0F;
-                if (dpad <= 7 && b0 != 0) {
+                if (dpad <= 7) {
                     g_dsInput.dpadUp    = (dpad == 0 || dpad == 1 || dpad == 7);
                     g_dsInput.dpadRight = (dpad == 1 || dpad == 2 || dpad == 3);
                     g_dsInput.dpadDown  = (dpad == 3 || dpad == 4 || dpad == 5);
